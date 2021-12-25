@@ -1,0 +1,36 @@
+main_path: /data1/erez/Documents/diff2
+resume_checkpoint: /data1/erez/Documents/diff2/211219_021113_clip_feat_in_adagn_train/model080000.pt
+
+#MODEL_FLAGS
+image_size: 128
+num_channels: 64 # 128
+num_res_blocks: 2
+learn_sigma: True # True
+class_cond: True # True for clip embd adaGN
+#attention_resolutions: 16,problem # D:16,8, REC: 32,16,8
+num_heads: 1 # D:4
+# dropout 0.1 ?? #D:0.0
+# num_head_channels 64 ?
+# resblock_updown True ? #D:False
+use_fp16: True # D:False
+
+#DIFFUSION_FLAGS
+diffusion_steps: 1000
+noise_schedule: cosine #linear
+#Reweighted VLB?
+
+#TRAIN_FLAGS
+lr: 0.0001
+batch_size: 48
+save_interval: 5000
+
+# DATA
+data_dir: /data2/erez/datasets/faces/raw_data/thumbnails128x128/
+clip_file_path: /data2/erez/datasets/faces/raw_data/thumbnails128x128_ViT-B32_dict.pt
+
+data_dir_test: /data2/erez/datasets/faces/raw_data/celeba_hq_256/
+clip_file_path_test: /data2/erez/datasets/faces/raw_data/clip_embd_celeba_hq_256_ViT-B32_dict.pt
+# num_workers: 4
+
+# DIFFUSION_TRAINING_TEST CUDA_VISIBLE_DEVICES=2 python scripts/image_train.py -d description
+# CUDA_VISIBLE_DEVICES=2 python scripts/super_res_train.py -d description
