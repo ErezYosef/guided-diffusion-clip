@@ -1,4 +1,6 @@
 import math
+import os.path
+
 import random
 
 from PIL import Image
@@ -6,7 +8,8 @@ import blobfile as bf
 from mpi4py import MPI
 import numpy as np
 from torch.utils.data import DataLoader, Dataset
-
+from torch import load
+from os.path import dirname, join
 
 def load_data(
     *,
@@ -17,6 +20,7 @@ def load_data(
     deterministic=False,
     random_crop=False,
     random_flip=True,
+    clip_file_path=None,
 ):
     """
     For a dataset, create a generator over (images, kwargs) pairs.
@@ -40,7 +44,7 @@ def load_data(
         raise ValueError("unspecified data directory")
     all_files = _list_image_files_recursively(data_dir)
     classes = None
-    if class_cond:
+    if class_cond and False:
         # Assume classes are the first part of the filename,
         # before an underscore.
         class_names = [bf.basename(path).split("_")[0] for path in all_files]
@@ -54,6 +58,7 @@ def load_data(
         num_shards=MPI.COMM_WORLD.Get_size(),
         random_crop=random_crop,
         random_flip=random_flip,
+        clip_file_path=clip_file_path,
     )
     if deterministic:
         loader = DataLoader(
@@ -89,6 +94,7 @@ class ImageDataset(Dataset):
         num_shards=1,
         random_crop=False,
         random_flip=True,
+        clip_file_path=None,
     ):
         super().__init__()
         self.resolution = resolution
@@ -96,6 +102,10 @@ class ImageDataset(Dataset):
         self.local_classes = None if classes is None else classes[shard:][::num_shards]
         self.random_crop = random_crop
         self.random_flip = random_flip
+        #clip_file_path = join(dirname(dirname(self.local_images[0])), 'thumbnails128x128_ViT-B32_dict.pt')
+        #print(clip_file_path, os.path.isfile(clip_file_path))
+        assert clip_file_path is not None
+        self.clip_data = load(clip_file_path, map_location='cpu')
 
     def __len__(self):
         return len(self.local_images)
@@ -120,6 +130,8 @@ class ImageDataset(Dataset):
         out_dict = {}
         if self.local_classes is not None:
             out_dict["y"] = np.array(self.local_classes[idx], dtype=np.int64)
+        out_dict['clip_feat'] = self.clip_data[bf.basename(path)]
+        #print(out_dict['spat_feat'])
         return np.transpose(arr, [2, 0, 1]), out_dict
 
 
