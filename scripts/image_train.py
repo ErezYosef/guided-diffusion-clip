@@ -14,14 +14,16 @@ from guided_diffusion.script_util import (
     add_dict_to_argparser,
 )
 from guided_diffusion.train_util import TrainLoop
-
+from guided_diffusion.script_util import parse_yaml
 
 def main():
     args = create_argparser().parse_args()
+    args = parse_yaml(args)
 
     dist_util.setup_dist()
-    logger.configure()
+    logger.configure(args=args)
 
+    logger.log(f'\n\t'.join(f'{k} = {v}' for k, v in vars(args).items()))
     logger.log("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(
         **args_to_dict(args, model_and_diffusion_defaults().keys())
@@ -29,12 +31,29 @@ def main():
     model.to(dist_util.dev())
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
 
-    logger.log("creating data loader...")
+    logger.log(f"creating data loader... dir: {args.data_dir}")
     data = load_data(
         data_dir=args.data_dir,
         batch_size=args.batch_size,
         image_size=args.image_size,
         class_cond=args.class_cond,
+        clip_file_path=args.clip_file_path,
+    )
+    val_data = load_data(
+        data_dir=args.data_dir,
+        batch_size=8, # args.batch_size, todo fix it
+        image_size=args.image_size,
+        class_cond=args.class_cond,
+        deterministic=True,
+        clip_file_path=args.clip_file_path,
+    )
+    test_data = load_data(
+        data_dir=args.data_dir_test,
+        batch_size=8, # args.batch_size, todo fix it
+        image_size=args.image_size,
+        class_cond=args.class_cond,
+        deterministic=True,
+        clip_file_path=args.clip_file_path_test,
     )
 
     logger.log("training...")
@@ -54,6 +73,7 @@ def main():
         schedule_sampler=schedule_sampler,
         weight_decay=args.weight_decay,
         lr_anneal_steps=args.lr_anneal_steps,
+        val_datasets=(val_data, test_data),
     ).run_loop()
 
 
@@ -67,8 +87,8 @@ def create_argparser():
         batch_size=1,
         microbatch=-1,  # -1 disables microbatches
         ema_rate="0.9999",  # comma-separated list of EMA values
-        log_interval=10,
-        save_interval=10000,
+        log_interval=100,
+        save_interval=5000,
         resume_checkpoint="",
         use_fp16=False,
         fp16_scale_growth=1e-3,

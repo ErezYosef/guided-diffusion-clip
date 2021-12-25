@@ -16,13 +16,15 @@ from guided_diffusion.script_util import (
     add_dict_to_argparser,
 )
 from guided_diffusion.train_util import TrainLoop
-
+from guided_diffusion.script_util import parse_yaml
 
 def main():
     args = create_argparser().parse_args()
+    args = parse_yaml(args)
 
     dist_util.setup_dist()
-    logger.configure()
+    logger.configure(args=args)
+    logger.log(f'\n\t'.join(f'{k} = {v}' for k, v in vars(args).items()))
 
     logger.log("creating model...")
     model, diffusion = sr_create_model_and_diffusion(
@@ -38,6 +40,22 @@ def main():
         large_size=args.large_size,
         small_size=args.small_size,
         class_cond=args.class_cond,
+    )
+    val_data = load_superres_data(
+        args.data_dir,
+        8, # args.batch_size, todo fix it
+        large_size=args.large_size,
+        small_size=args.small_size,
+        class_cond=args.class_cond,
+        deterministic=True,
+    )
+    test_data = load_data(
+        data_dir=args.data_dir_test,
+        batch_size=8,  # args.batch_size, todo fix it
+        image_size=args.image_size,
+        class_cond=args.class_cond,
+        deterministic=True,
+        clip_file_path=args.clip_file_path_test,
     )
 
     logger.log("training...")
@@ -57,15 +75,17 @@ def main():
         schedule_sampler=schedule_sampler,
         weight_decay=args.weight_decay,
         lr_anneal_steps=args.lr_anneal_steps,
+        val_datasets=(val_data, test_data),
     ).run_loop()
 
 
-def load_superres_data(data_dir, batch_size, large_size, small_size, class_cond=False):
+def load_superres_data(data_dir, batch_size, large_size, small_size, class_cond=False, deterministic=False):
     data = load_data(
         data_dir=data_dir,
         batch_size=batch_size,
         image_size=large_size,
         class_cond=class_cond,
+        deterministic=deterministic,
     )
     for large_batch, model_kwargs in data:
         model_kwargs["low_res"] = F.interpolate(large_batch, small_size, mode="area")
@@ -82,7 +102,7 @@ def create_argparser():
         batch_size=1,
         microbatch=-1,
         ema_rate="0.9999",
-        log_interval=10,
+        log_interval=100,
         save_interval=10000,
         resume_checkpoint="",
         use_fp16=False,
