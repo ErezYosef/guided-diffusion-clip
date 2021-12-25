@@ -4,8 +4,9 @@ import inspect
 from . import gaussian_diffusion as gd
 from .respace import SpacedDiffusion, space_timesteps
 from .unet import SuperResModel, UNetModel, EncoderUNetModel
-
-NUM_CLASSES = 1000
+from guided_diffusion.unet_other import UNetModel_clip_feat, SpatFeatureModel, SRImageModel_Feat
+import yaml
+NUM_CLASSES = 512
 
 
 def diffusion_defaults():
@@ -163,7 +164,9 @@ def create_model(
     for res in attention_resolutions.split(","):
         attention_ds.append(image_size // int(res))
 
-    return UNetModel(
+
+    model_to_return = UNetModel_clip_feat
+    return model_to_return(
         image_size=image_size,
         in_channels=3,
         model_channels=num_channels,
@@ -268,7 +271,7 @@ def create_classifier(
 
 def sr_model_and_diffusion_defaults():
     res = model_and_diffusion_defaults()
-    res["large_size"] = 256
+    res["large_size"] = 128 # same as input and output for our case
     res["small_size"] = 64
     arg_names = inspect.getfullargspec(sr_create_model_and_diffusion)[0]
     for k in res.copy().keys():
@@ -356,6 +359,8 @@ def sr_create_model(
         channel_mult = (1, 1, 2, 2, 4, 4)
     elif large_size == 64:
         channel_mult = (1, 2, 3, 4)
+    elif large_size == 128:
+        channel_mult = (1, 1, 2, 3, 4)
     else:
         raise ValueError(f"unsupported large size: {large_size}")
 
@@ -363,7 +368,8 @@ def sr_create_model(
     for res in attention_resolutions.split(","):
         attention_ds.append(large_size // int(res))
 
-    return SuperResModel(
+    model_to_return = SRImageModel_Feat#SpatFeatureModel
+    return model_to_return(
         image_size=large_size,
         in_channels=3,
         model_channels=num_channels,
@@ -432,6 +438,10 @@ def add_dict_to_argparser(parser, default_dict):
         elif isinstance(v, bool):
             v_type = str2bool
         parser.add_argument(f"--{k}", default=v, type=v_type)
+    parser.add_argument('--config-file', dest='config_file', default='config.yaml',
+                        type=argparse.FileType(mode='r'))
+    parser.add_argument('-d', '--description', dest='description', type=str, default='',
+                        help='free description of the run')
 
 
 def args_to_dict(args, keys):
@@ -450,3 +460,18 @@ def str2bool(v):
         return False
     else:
         raise argparse.ArgumentTypeError("boolean value expected")
+
+
+def parse_yaml(args):
+    # args = parser.parse_args()
+    if args.config_file:
+        data = yaml.load(args.config_file, yaml.SafeLoader)
+        delattr(args, 'config_file')
+        arg_dict = args.__dict__
+        for key, value in data.items():
+            if isinstance(value, list):
+                for v in value:
+                    arg_dict[key].append(v)
+            else:
+                arg_dict[key] = value
+    return args
