@@ -7,11 +7,13 @@ import torch as th
 import torch.distributed as dist
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 from torch.optim import AdamW
+import numpy as np
 
 from . import dist_util, logger
 from .fp16_util import MixedPrecisionTrainer
 from .nn import update_ema
 from .resample import LossAwareSampler, UniformSampler
+from .saving_imgs_utils import save_img,tensor2img
 
 # For ImageNet experiments, this was a good default value.
 # We found that the lg_loss_scale quickly climbed to
@@ -38,10 +40,13 @@ class TrainLoop:
         schedule_sampler=None,
         weight_decay=0.0,
         lr_anneal_steps=0,
+        val_datasets=None,
     ):
         self.model = model
         self.diffusion = diffusion
         self.data = data
+        self.val_datasets = val_datasets
+        self.ref_samples = (next(self.val_datasets[0]), next(self.val_datasets[1]))
         self.batch_size = batch_size
         self.microbatch = microbatch if microbatch > 0 else batch_size
         self.lr = lr
@@ -109,8 +114,9 @@ class TrainLoop:
 
     def _load_and_sync_parameters(self):
         resume_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
-
+        print('=== ', self.resume_checkpoint)
         if resume_checkpoint:
+            print('=== ENTER')
             self.resume_step = parse_resume_step_from_filename(resume_checkpoint)
             if dist.get_rank() == 0:
                 logger.log(f"loading model from checkpoint: {resume_checkpoint}...")
@@ -161,8 +167,13 @@ class TrainLoop:
                 logger.dumpkvs()
             if self.step % self.save_interval == 0:
                 self.save()
+                logger.log("sampling images...")
+                self.val_sample(1)
+                self.val_sample(0)
+                logger.log("sampling complete")
                 # Run for a finite amount of time in integration tests.
                 if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
+                    print('recieved DIFFUSION_TRAINING_TEST indication')
                     return
             self.step += 1
         # Save the last checkpoint if it wasn't already saved.
@@ -240,6 +251,7 @@ class TrainLoop:
                     filename = f"ema_{rate}_{(self.step+self.resume_step):06d}.pt"
                 with bf.BlobFile(bf.join(get_blob_logdir(), filename), "wb") as f:
                     th.save(state_dict, f)
+                    #print(f'saved_to_{f}')
 
         save_checkpoint(0, self.mp_trainer.master_params)
         for rate, params in zip(self.ema_rate, self.ema_params):
@@ -253,6 +265,80 @@ class TrainLoop:
                 th.save(self.opt.state_dict(), f)
 
         dist.barrier()
+
+    def val_sample(self, data_to_sample=None):
+        assert data_to_sample is not None
+        ref_samples_data_i = self.ref_samples[data_to_sample]
+        self.model.eval()
+        args = lambda: None # fix it
+        args.batch_size = 8
+        args.num_samples = 8
+        args.class_cond = True
+        NUM_CLASSES = -1
+        use_ddim = False
+        image_size = self.model.image_size
+        # Local setup
+        clip_denoised = True
+
+        all_images = []
+        all_labels = []
+        while len(all_images) * args.batch_size < args.num_samples:
+            model_kwargs = {}
+            if args.class_cond and False:
+                classes = th.randint(
+                    low=0, high=NUM_CLASSES, size=(args.batch_size,), device=dist_util.dev()
+                )
+                model_kwargs["y"] = classes
+            sample_fn = (
+                self.diffusion.p_sample_loop if not args.use_ddim else self.diffusion.ddim_sample_loop
+            )
+            #ref_samples = next(self.val_data)
+            model_kwargs['clip_feat'] = ref_samples_data_i[1]['clip_feat'].to(device=dist_util.dev())
+            if True: # SR # todo fix
+                model_kwargs['clip_feat2'] = ref_samples_data_i[1]['clip_feat2'].to(device=dist_util.dev())
+                model_kwargs['img2'] = ref_samples_data_i[1]['img2'].to(device=dist_util.dev())
+            sample = sample_fn(
+                self.model,
+                (args.batch_size, 3, image_size, image_size),
+                clip_denoised=clip_denoised,
+                model_kwargs=model_kwargs,
+            )
+            sample_cp = sample.clone()
+            sample = ((sample + 1) * 127.5).clamp(0, 255).to(th.uint8)
+            sample = sample.permute(0, 2, 3, 1)
+            sample = sample.contiguous()
+
+            gathered_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
+            dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
+            all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
+            if args.class_cond and False:
+                gathered_labels = [
+                    th.zeros_like(classes) for _ in range(dist.get_world_size())
+                ]
+                dist.all_gather(gathered_labels, classes)
+                all_labels.extend([labels.cpu().numpy() for labels in gathered_labels])
+            #logger.log(f"created {len(all_images) * args.batch_size} samples")
+
+        arr = np.concatenate(all_images, axis=0)
+        arr = arr[: args.num_samples]
+        if args.class_cond and False:
+            label_arr = np.concatenate(all_labels, axis=0)
+            label_arr = label_arr[: args.num_samples]
+        if dist.get_rank() == 0:
+            shape_str = "x".join([str(x) for x in arr.shape])
+            out_path = os.path.join(logger.get_dir(), f"samples{(self.step+self.resume_step):06d}.npz")
+            #logger.log(f"saving to {out_path}, in resolution: {shape_str}")
+            if args.class_cond and False:
+                np.savez(out_path, arr, label_arr)
+            else:
+                np.savez(out_path, arr)
+
+        res_img = tensor2img(sample_cp)
+        save_img(tensor2img(ref_samples_data_i[0]), os.path.join(logger.get_dir(), f"img{data_to_sample}_input0.png"))
+        save_img(res_img, os.path.join(logger.get_dir(), f"img{data_to_sample}_samples{(self.step+self.resume_step):06d}.png"))
+        dist.barrier()
+        #logger.log("sampling complete")
+        self.model.train()
 
 
 def parse_resume_step_from_filename(filename):
