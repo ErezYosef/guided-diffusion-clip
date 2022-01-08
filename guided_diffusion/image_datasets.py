@@ -59,6 +59,7 @@ def load_data(
         random_crop=random_crop,
         random_flip=random_flip,
         clip_file_path=clip_file_path,
+        deterministic=deterministic
     )
     if deterministic:
         loader = DataLoader(
@@ -95,6 +96,7 @@ class ImageDataset(Dataset):
         random_crop=False,
         random_flip=True,
         clip_file_path=None,
+        deterministic=False,
     ):
         super().__init__()
         self.resolution = resolution
@@ -104,13 +106,37 @@ class ImageDataset(Dataset):
         self.random_flip = random_flip
         #clip_file_path = join(dirname(dirname(self.local_images[0])), 'thumbnails128x128_ViT-B32_dict.pt')
         #print(clip_file_path, os.path.isfile(clip_file_path))
-        assert clip_file_path is not None
+        assert clip_file_path is not None, f'path: {clip_file_path}'
+        self.clip_file_path = clip_file_path
         self.clip_data = load(clip_file_path, map_location='cpu')
+        self.deterministic = deterministic
 
     def __len__(self):
         return len(self.local_images)
 
     def __getitem__(self, idx):
+        img, out_dict = self.get_sample(idx)
+        #print(out_dict['spat_feat'])
+        # add img2:
+
+        if not self.deterministic:
+            if random.random() < 0.15:
+                idx2 = idx
+                idx2_data = img, out_dict
+            else:
+                idx2 = random.randint(0, len(self)-1)#
+                idx2_data = self.get_sample(idx2)
+        else:
+            idx2 = idx if idx<4 else idx-1
+            idx2_data = (img, out_dict) if idx<4 else self.get_sample(idx-1)
+
+        img2, out_dict2 = idx2_data
+        out_dict['img2'] = img2
+
+        out_dict['clip_feat2'] = out_dict2['clip_feat']
+        return img, out_dict
+
+    def get_sample(self, idx):
         path = self.local_images[idx]
         with bf.BlobFile(path, "rb") as f:
             pil_image = Image.open(f)
@@ -121,8 +147,8 @@ class ImageDataset(Dataset):
             arr = random_crop_arr(pil_image, self.resolution)
         else:
             arr = center_crop_arr(pil_image, self.resolution)
-
-        if self.random_flip and random.random() < 0.5:
+        img_flipped = self.random_flip and random.random() < 0.5
+        if img_flipped:
             arr = arr[:, ::-1]
 
         arr = arr.astype(np.float32) / 127.5 - 1
@@ -130,9 +156,12 @@ class ImageDataset(Dataset):
         out_dict = {}
         if self.local_classes is not None:
             out_dict["y"] = np.array(self.local_classes[idx], dtype=np.int64)
-        out_dict['clip_feat'] = self.clip_data[bf.basename(path)]
-        #print(out_dict['spat_feat'])
+        if 'caleba' in self.clip_file_path:
+            out_dict['clip_feat'] = self.clip_data[bf.basename(path)]
+        else:
+            out_dict['clip_feat'] = self.clip_data[bf.basename(path)][int(img_flipped)]
         return np.transpose(arr, [2, 0, 1]), out_dict
+
 
 
 def center_crop_arr(pil_image, image_size):
