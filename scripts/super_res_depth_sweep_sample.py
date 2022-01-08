@@ -22,7 +22,7 @@ from guided_diffusion.script_util import parse_yaml
 from guided_diffusion.image_datasets import load_data
 from guided_diffusion.saving_imgs_utils import save_img,tensor2img
 from guided_diffusion.script_util import load_folder_path_parse
-from guided_diffusion.sample_util import process1
+from guided_diffusion.sample_util import *
 def main():
     args = create_argparser().parse_args()
     print(args.config_file)
@@ -59,38 +59,42 @@ def main():
         random_flip=False,
         clip_file_path=args.clip_file_path_test,
     )
-
+    denoise_start_point = range(500, 1000, 199)
     logger.log("creating samples...")
     all_images = []
+
     counter=0
     while len(all_images) * args.batch_size < args.num_samples:
         imgs, kwargs = next(data)
-        model_kwargs = kwargs
-        imgs_start = kwargs['img2']
-        denoise_start_point_if = (args.denoise_start_point, imgs_start.to(dist_util.dev())) if args.denoise_start_point else None
-        #model_kwargs = process1(model_kwargs)
-        model_kwargs = {k: v.to(dist_util.dev()) for k, v in model_kwargs.items()}
-        sample = diffusion.p_sample_loop(
-            model,
-            (args.batch_size, 3, args.large_size, args.large_size),
-            clip_denoised=args.clip_denoised,
-            model_kwargs=model_kwargs,
-            denoise_start_point=denoise_start_point_if,
-        )
-        sample_cp = sample.clone()
-        sample = ((sample + 1) * 127.5).clamp(0, 255).to(th.uint8)
-        sample = sample.permute(0, 2, 3, 1)
-        sample = sample.contiguous()
+        kwargs = process1(kwargs)
+        imgs_start = kwargs['img2'].to(dist_util.dev())
+        for st in denoise_start_point:
+            model_kwargs = kwargs
 
-        all_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
-        dist.all_gather(all_samples, sample)  # gather not supported with NCCL
-        for sample in all_samples:
-            all_images.append(sample.cpu().numpy())
-        logger.log(f"created {len(all_images) * args.batch_size} samples")
+            denoise_start_point_if = (st, imgs_start)
+            #model_kwargs = process1(model_kwargs)
+            model_kwargs = {k: v.to(dist_util.dev()) for k, v in model_kwargs.items()}
+            sample = diffusion.p_sample_loop(
+                model,
+                (args.batch_size, 3, args.large_size, args.large_size),
+                clip_denoised=args.clip_denoised,
+                model_kwargs=model_kwargs,
+                denoise_start_point=denoise_start_point_if,
+            )
+            sample_cp = sample.clone()
+            sample = ((sample + 1) * 127.5).clamp(0, 255).to(th.uint8)
+            sample = sample.permute(0, 2, 3, 1)
+            sample = sample.contiguous()
 
-        res_img = tensor2img(sample_cp)
-        save_img(res_img, os.path.join(logger.get_dir(), f"samples_test{counter}.png"))
-        counter+=1
+            all_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
+            dist.all_gather(all_samples, sample)  # gather not supported with NCCL
+            for sample in all_samples:
+                all_images.append(sample.cpu().numpy())
+            logger.log(f"created {len(all_images) * args.batch_size} samples")
+
+            res_img = tensor2img(sample_cp)
+            save_img(res_img, os.path.join(logger.get_dir(), f"samples_depth{st}_test{counter}.png"))
+            counter+=1
     '''
     arr = np.concatenate(all_images, axis=0)
     arr = arr[: args.num_samples]
