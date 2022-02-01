@@ -1,0 +1,29 @@
+main_path: /data1/erez/Documents/diff2
+sub_dir_tstsave: 0_tests
+load_file: ema_0.9999_505000.pt
+#model_path: /data1/erez/Documents/diff2/211218_193412_unconditioned_generation_cont10k_with_val/model430000.pt
+#resume_ema_opt: False
+
+#MODEL_FLAGS
+image_size: 128
+num_channels: 64 # 128
+num_res_blocks: 2
+learn_sigma: True # True
+class_cond: True # True for clip embd adaGN
+#attention_resolutions: 16,problem # D:16,8, REC: 32,16,8
+num_heads: 1 # D:4
+use_fp16: True # D:False
+noise_schedule: cosine #linear
+# DATA
+data_dir_test: /data2/erez/datasets/faces/raw_data/celeba_hq_256/
+clip_file_path_test: /data2/erez/datasets/faces/raw_data/clip_embd_celeba_hq_256_ViT-B32_dict.pt
+# num_workers: 4
+
+# val-test params:
+batch_size: 8
+num_samples: 8
+denoise_start_point: -1 # steps from x to 0, 800
+timestep_respacing: 100
+
+
+#model_path: p
