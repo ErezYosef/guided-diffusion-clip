@@ -449,7 +449,7 @@ class GaussianDiffusion:
         model_kwargs=None,
         device=None,
         progress=False,
-        denoise_start_point=None,
+        denoise_start_point=-1,
     ):
         """
         Generate samples from the model.
@@ -515,10 +515,10 @@ class GaussianDiffusion:
         else:
             img = th.randn(*shape, device=device)
         start_point = self.num_timesteps
-        if denoise_start_point is not None:
-            start_point = denoise_start_point[0]
+        if denoise_start_point != -1:
+            start_point = denoise_start_point
             time_vec = th.tensor([start_point] * shape[0], device=device)
-            img = self.q_sample(denoise_start_point[1], time_vec)
+            img = self.q_sample(model_kwargs['img2'], time_vec)
             print('start sampling from t_step: ', start_point)
         indices = list(range(start_point))[::-1]
 
