@@ -53,7 +53,12 @@ class SRImageModel_Feat(UNetModel):
         print('layer_changed !', self.num_classes, self.time_embed_dim)
 
     def forward(self, x, timesteps, clip_feat=None, clip_feat2=None, img2=None, **kwargs):
-
+        '''
+        Xt: noisy img1 at timstep t
+        img2: reference/input image
+        clip_feat1,2: clip features
+        We want to predict X0 from Xt using the clip_feat and img2
+        '''
         y = clip_feat.squeeze().float()  # Nx512
         clip_feat2 = clip_feat2.squeeze().float()  # Nx512
         #print('yshape', clip_feat2.shape, self.bias_feat)
