@@ -5,9 +5,10 @@ from . import gaussian_diffusion as gd
 from .respace import SpacedDiffusion, space_timesteps
 from .unet import SuperResModel, UNetModel, EncoderUNetModel
 from guided_diffusion.unet_other import UNetModel_clip_feat, SpatFeatureModel, SRImageModel_Feat
+from guided_diffusion.unet_other import *
 import yaml
 NUM_CLASSES = 512
-
+import os
 
 def diffusion_defaults():
     """
@@ -22,6 +23,7 @@ def diffusion_defaults():
         predict_xstart=False,
         rescale_timesteps=False,
         rescale_learned_sigmas=False,
+        use_unsup_loss=False,
     )
 
 
@@ -96,6 +98,7 @@ def create_model_and_diffusion(
     resblock_updown,
     use_fp16,
     use_new_attention_order,
+    use_unsup_loss,
 ):
     model = create_model(
         image_size,
@@ -124,6 +127,7 @@ def create_model_and_diffusion(
         rescale_timesteps=rescale_timesteps,
         rescale_learned_sigmas=rescale_learned_sigmas,
         timestep_respacing=timestep_respacing,
+        use_unsup_loss=use_unsup_loss,
     )
     return model, diffusion
 
@@ -303,6 +307,7 @@ def sr_create_model_and_diffusion(
     use_scale_shift_norm,
     resblock_updown,
     use_fp16,
+    use_unsup_loss,
 ):
     model = sr_create_model(
         large_size,
@@ -330,6 +335,7 @@ def sr_create_model_and_diffusion(
         rescale_timesteps=rescale_timesteps,
         rescale_learned_sigmas=rescale_learned_sigmas,
         timestep_respacing=timestep_respacing,
+        use_unsup_loss=use_unsup_loss,
     )
     return model, diffusion
 
@@ -368,7 +374,7 @@ def sr_create_model(
     for res in attention_resolutions.split(","):
         attention_ds.append(large_size // int(res))
 
-    model_to_return = SRImageModel_Feat#SpatFeatureModel
+    model_to_return = SRImageModel_Feat  # SRImageModel_Feat_cont ##SpatFeatureModel
     return model_to_return(
         image_size=large_size,
         in_channels=3,
@@ -400,6 +406,7 @@ def create_gaussian_diffusion(
     rescale_timesteps=False,
     rescale_learned_sigmas=False,
     timestep_respacing="",
+    use_unsup_loss=False,
 ):
     betas = gd.get_named_beta_schedule(noise_schedule, steps)
     if use_kl:
@@ -410,6 +417,8 @@ def create_gaussian_diffusion(
         loss_type = gd.LossType.MSE
     if not timestep_respacing:
         timestep_respacing = [steps]
+    else:
+        timestep_respacing = [timestep_respacing]
     return SpacedDiffusion(
         use_timesteps=space_timesteps(steps, timestep_respacing),
         betas=betas,
@@ -427,10 +436,18 @@ def create_gaussian_diffusion(
         ),
         loss_type=loss_type,
         rescale_timesteps=rescale_timesteps,
+        use_unsup_loss=use_unsup_loss,
     )
 
 
 def add_dict_to_argparser(parser, default_dict):
+    config_file_def = default_dict.pop('config_file', None)
+    if config_file_def is None:
+        parser.add_argument('--config-file', dest='config_file', default='config.yaml',
+                            type=argparse.FileType(mode='r'))
+    else:
+        parser.add_argument('--config-file', dest='config_file', default=config_file_def,
+                            type=argparse.FileType(mode='r'))
     for k, v in default_dict.items():
         v_type = type(v)
         if v is None:
@@ -438,10 +455,12 @@ def add_dict_to_argparser(parser, default_dict):
         elif isinstance(v, bool):
             v_type = str2bool
         parser.add_argument(f"--{k}", default=v, type=v_type)
-    parser.add_argument('--config-file', dest='config_file', default='config.yaml',
-                        type=argparse.FileType(mode='r'))
     parser.add_argument('-d', '--description', dest='description', type=str, default='',
                         help='free description of the run')
+    parser.add_argument('-f', '--load', dest='load', type=str, default=False,
+                        help='Load model from a .pth file')
+    parser.add_argument('--lf', dest='load_file', type=str, default=None,
+                        help='Name of the file to load the model')
 
 
 def args_to_dict(args, keys):
@@ -467,6 +486,8 @@ def parse_yaml(args):
     if args.config_file:
         data = yaml.load(args.config_file, yaml.SafeLoader)
         delattr(args, 'config_file')
+        print('CONTENT:')
+        print(data, os.listdir())
         arg_dict = args.__dict__
         for key, value in data.items():
             if isinstance(value, list):
@@ -475,3 +496,16 @@ def parse_yaml(args):
             else:
                 arg_dict[key] = value
     return args
+
+def load_folder_path_parse(args):
+    if args.load_file is None:
+        args.load_file = 'final_parameters.pt' # default
+    if not os.path.isdir(os.path.join(args.main_path, args.load)):
+        folder = [name for name in os.listdir(args.main_path) if args.load in name]
+        selected = 0
+        #if args.save_folder in folder: folder.remove(args.save_folder)
+        if len(folder) > 1:
+            print(f'Options: {folder} plese be more specific which model to load.')
+            selected = int(input('Enter selection num: 0,1 .. :'))
+        args.load = os.path.join(args.main_path, folder[selected])
+        args.model_path = os.path.join(args.load, args.load_file)

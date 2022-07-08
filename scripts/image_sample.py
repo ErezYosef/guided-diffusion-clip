@@ -69,7 +69,7 @@ def main():
     while len(all_images) * args.batch_size < args.num_samples:
         # model_kwargs = {}
         imgs, kwargs = next(data)
-        kwargs = add_delta_imgimg(kwargs)
+        kwargs = add_delta(kwargs)
         model_kwargs = kwargs
         imgs_start = kwargs['img2']
         print(imgs_start.shape,kwargs['clip_feat'].shape )

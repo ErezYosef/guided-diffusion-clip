@@ -10,10 +10,12 @@ import math
 
 import numpy as np
 import torch as th
+import torch.nn
 
 from .nn import mean_flat
 from .losses import normal_kl, discretized_gaussian_log_likelihood
-
+import clip
+import torchvision
 
 def get_named_beta_schedule(schedule_name, num_diffusion_timesteps):
     """
@@ -123,11 +125,13 @@ class GaussianDiffusion:
         model_var_type,
         loss_type,
         rescale_timesteps=False,
+        use_unsup_loss=False,
     ):
         self.model_mean_type = model_mean_type
         self.model_var_type = model_var_type
         self.loss_type = loss_type
         self.rescale_timesteps = rescale_timesteps
+        self.use_unsup_loss = use_unsup_loss
 
         # Use float64 for accuracy.
         betas = np.array(betas, dtype=np.float64)
@@ -167,6 +171,7 @@ class GaussianDiffusion:
             * np.sqrt(alphas)
             / (1.0 - self.alphas_cumprod)
         )
+        self.clip_model = None
 
     def q_mean_variance(self, x_start, t):
         """
@@ -362,7 +367,8 @@ class GaussianDiffusion:
 
         This uses the conditioning strategy from Sohl-Dickstein et al. (2015).
         """
-        gradient = cond_fn(x, self._scale_timesteps(t), **model_kwargs)
+        #model_kwargs['p_mean_var'] = p_mean_var
+        gradient = cond_fn(x, self._scale_timesteps(t),  **model_kwargs)
         new_mean = (
             p_mean_var["mean"].float() + p_mean_var["variance"] * gradient.float()
         )
@@ -471,6 +477,7 @@ class GaussianDiffusion:
         :return: a non-differentiable batch of samples.
         """
         final = None
+        n=0
         for sample in self.p_sample_loop_progressive(
             model,
             shape,
@@ -484,6 +491,16 @@ class GaussianDiffusion:
             denoise_start_point=denoise_start_point,
         ):
             final = sample
+            if n%100==0:
+                img_save = final["pred_xstart"]+model_kwargs['img']
+                img_save2 = final["sample"]+model_kwargs['img']
+                imgs_target = torch.cat([img_save, img_save2])
+                if n==0:
+                    from guided_diffusion.saving_imgs_utils import save_img, tensor2img
+                    import os
+                save_img(tensor2img(imgs_target), os.path.join(model_kwargs['loggerdir'], f"running{n}.png"))
+            n+=1
+
         return final["sample"]
 
     def p_sample_loop_progressive(
@@ -519,7 +536,7 @@ class GaussianDiffusion:
             start_point = denoise_start_point
             time_vec = th.tensor([start_point] * shape[0], device=device)
             img = self.q_sample(model_kwargs['img2'], time_vec)
-            print('start sampling from t_step: ', start_point)
+            # print('start sampling from t_step: ', start_point)
         indices = list(range(start_point))[::-1]
 
         if progress:
@@ -820,10 +837,39 @@ class GaussianDiffusion:
                 terms["loss"] = terms["mse"] + terms["vb"]
             else:
                 terms["loss"] = terms["mse"]
+            if self.use_unsup_loss:
+                #print('use unsuploss')
+                if self.model_mean_type == ModelMeanType.PREVIOUS_X:
+                    pred_xstart = self._predict_xstart_from_xprev(x_t=x_t, t=t, xprev=model_output)
+                elif self.model_mean_type == ModelMeanType.START_X:
+                    pred_xstart = model_output
+                else:
+                    pred_xstart = self._predict_xstart_from_eps(x_t=x_t, t=t, eps=model_output)
+                l1_sparse_pred_xstart = mean_flat(torch.abs(pred_xstart))
+                #print([d.shape for d in (model_kwargs['clip_feat_img_save'],model_kwargs['clip_feat'],model_kwargs['clip_feat2'])])
+                clip_target = model_kwargs['clip_feat_img_save'] + (model_kwargs['clip_feat']-model_kwargs['clip_feat2'])
+                cliploss = self._clip_loss(pred_xstart+model_kwargs['img'], clip_target)
+                terms["loss"] = cliploss + 0.1 * l1_sparse_pred_xstart
         else:
             raise NotImplementedError(self.loss_type)
 
         return terms
+
+    def _clip_loss(self, img, txt_embd):
+        if self.clip_model is None:
+            model, preprocess = clip.load("ViT-B/32", device=img.device)
+            self.clip_model = model.eval()
+            self.resize = torchvision.transforms.Resize(224, interpolation=3) # 3 means PIL.Image.BICUBIC
+            mean = [2*x-1 for x in (0.48145466, 0.4578275, 0.40821073) ]
+            std = [2*x for x in (0.26862954, 0.26130258, 0.27577711)]
+            self.normlize = torchvision.transforms.Normalize(mean , std)
+            self.cosine_sim = torch.nn.CosineSimilarity()
+            pass
+        img_clip_input = self.normlize(self.resize(img))
+        img_embd = self.clip_model.encode_image(img_clip_input)
+        assert img_embd.shape == txt_embd.shape, f'{img_embd.shape} =/= {txt_embd.shape}'
+        loss = 1 - self.cosine_sim(img_embd, txt_embd)
+        return loss
 
     def _prior_bpd(self, x_start):
         """

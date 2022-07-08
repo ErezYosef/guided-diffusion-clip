@@ -18,13 +18,29 @@ from guided_diffusion.script_util import (
     args_to_dict,
     add_dict_to_argparser,
 )
+from guided_diffusion.script_util import parse_yaml
+from guided_diffusion.image_datasets import load_data
+from guided_diffusion.saving_imgs_utils import save_img,tensor2img
+from guided_diffusion.script_util import load_folder_path_parse
+from guided_diffusion.sample_util import *
+UNSUP = True
+if UNSUP:
+    from guided_diffusion.img_txt_dataset import load_data
+# CUDA_VISIBLE_DEVICES=0 python scripts/super_res_depth_sweep_sample.py -f factor0 -d tstrun_factor0
 
 
 def main():
     args = create_argparser().parse_args()
+    print(args.config_file)
+    #args.config_file = 'sample_config.yaml'
+    args = parse_yaml(args)
+    load_folder_path_parse(args)
+    args.large_size = args.image_size
+    args.main_path = os.path.join(args.main_path, args.sub_dir_tstsave)
 
     dist_util.setup_dist()
-    logger.configure()
+    logger.configure(args=args)
+    logger.log(f'\n\t'.join(f'{k} = {v}' for k, v in vars(args).items()))
 
     logger.log("creating model...")
     model, diffusion = sr_create_model_and_diffusion(
@@ -37,21 +53,40 @@ def main():
     if args.use_fp16:
         model.convert_to_fp16()
     model.eval()
-
+    print("RESPACING",args.timestep_respacing)
     logger.log("loading data...")
-    data = load_data_for_worker(args.base_samples, args.batch_size, args.class_cond)
+    #data = load_data_for_worker(args.base_samples, args.batch_size, args.class_cond)
+    data = load_data(
+        data_dir=args.data_dir,
+        batch_size=args.batch_size,
+        image_size=args.large_size,
+        class_cond=args.class_cond,
+        deterministic=True,
+        random_crop=False,
+        random_flip=False,
+        clip_file_path=args.clip_file_path,
+    )
 
     logger.log("creating samples...")
     all_images = []
+    counter=0
     while len(all_images) * args.batch_size < args.num_samples:
-        model_kwargs = next(data)
+        imgs, kwargs = next(data)
+        model_kwargs = kwargs
+        #imgs_start = kwargs['img2']
+        #denoise_start_point_if = (args.denoise_start_point, imgs_start.to(dist_util.dev())) if args.denoise_start_point!=-1 else None
+        #if args.denoise_start_point != -1:
+        #    model_kwargs['img2'] = imgs_start.to(dist_util.dev())
+        #model_kwargs = process1(model_kwargs)
         model_kwargs = {k: v.to(dist_util.dev()) for k, v in model_kwargs.items()}
         sample = diffusion.p_sample_loop(
             model,
             (args.batch_size, 3, args.large_size, args.large_size),
             clip_denoised=args.clip_denoised,
             model_kwargs=model_kwargs,
+            denoise_start_point=args.denoise_start_point,
         )
+        sample_cp = sample.clone()
         sample = ((sample + 1) * 127.5).clamp(0, 255).to(th.uint8)
         sample = sample.permute(0, 2, 3, 1)
         sample = sample.contiguous()
@@ -61,7 +96,19 @@ def main():
         for sample in all_samples:
             all_images.append(sample.cpu().numpy())
         logger.log(f"created {len(all_images) * args.batch_size} samples")
+        add_diff_tosave = True
+        sample_cp = sample_cp.cpu()
+        #sample_cp_nobias = sample_cp - torch.mean(sample_cp, (2,3), keepdim=True)
+        if add_diff_tosave:
+            imgs_target = model_kwargs['img'].cpu()
+            sample_cp = sample_cp +model_kwargs['img2'].cpu()
+        res_img = tensor2img(sample_cp)
+        save_img(res_img, os.path.join(logger.get_dir(), f"samples_test{counter}.png"))
+        save_img(tensor2img(imgs_target), os.path.join(logger.get_dir(), f"img{counter}_tinput0.png"))
 
+        counter+=1
+        #torch.save(sample_cp.cpu(), os.path.join(logger.get_dir(), f"samples_data{counter}.pt"))
+    '''
     arr = np.concatenate(all_images, axis=0)
     arr = arr[: args.num_samples]
     if dist.get_rank() == 0:
@@ -69,7 +116,7 @@ def main():
         out_path = os.path.join(logger.get_dir(), f"samples_{shape_str}.npz")
         logger.log(f"saving to {out_path}")
         np.savez(out_path, arr)
-
+    '''
     dist.barrier()
     logger.log("sampling complete")
 
@@ -108,6 +155,8 @@ def create_argparser():
         use_ddim=False,
         base_samples="",
         model_path="",
+        config_file='sample_config.yaml',
+        denoise_start_point=None,
     )
     defaults.update(sr_model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

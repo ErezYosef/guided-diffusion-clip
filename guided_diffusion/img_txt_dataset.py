@@ -2,6 +2,7 @@ import math
 import os.path
 
 import random
+import torch
 
 from PIL import Image
 import blobfile as bf
@@ -10,6 +11,7 @@ import numpy as np
 from torch.utils.data import DataLoader, Dataset
 from torch import load
 from os.path import dirname, join
+import clip
 
 def load_data(
     *,
@@ -111,14 +113,25 @@ class ImageDataset(Dataset):
         self.clip_data = load(clip_file_path, map_location='cpu')
         self.deterministic = deterministic
 
+        model, preprocess = clip.load("ViT-B/32", device='cpu')
+        model.eval()
+        with torch.no_grad():
+            text = clip.tokenize(["a face with long hair"]).to('cpu') # a face with long hair
+            self.y0 = model.encode_text(text)[0]
+            text2 = clip.tokenize(["face"]).to('cpu')
+            self.x0 = model.encode_text(text2)[0]
+            self.delta0 = self.y0 - self.x0
+
     def __len__(self):
         return len(self.local_images)
 
     def __getitem__(self, idx):
+        idx=2 # 21=Mying
         img, out_dict = self.get_sample(idx)
+        out_dict['clip_feat_img_save'] = out_dict['clip_feat'][0].clone()
         #print(out_dict['spat_feat'])
         # add img2:
-
+        '''
         if not self.deterministic:
             if random.random() < 0.15:
                 idx2 = idx
@@ -129,20 +142,29 @@ class ImageDataset(Dataset):
         else:
             idx2 = idx if idx<4 else idx-1
             idx2_data = (img, out_dict) if idx<4 else self.get_sample(idx-1)
+        '''
 
-        img2, out_dict2 = idx2_data
-        out_dict['img2'] = img2
+        #img2, out_dict2 = idx2_data
+        out_dict['img2'] = img # SOURCE IMAGE To CONCAT with the noise
 
-        out_dict['clip_feat2'] = out_dict2['clip_feat']
+        #out_dict['clip_feat2'] = out_dict2['clip_feat']
+        out_dict['clip_feat2'] = self.x0 # source point x0 want to change to y0
+        out_dict['clip_feat'] = self.y0 # target point y0. the direction is Delta0=target-source
         return_diff = True
         if return_diff:
-            out_dict['img'] = img
-            img = img - img2
+            out_dict['img'] = img # target is missing in unsup
+            img = np.zeros_like(img) # img - img2 starting at zero since target is missing in unsup
 
         return img, out_dict
 
     def get_sample(self, idx):
         path = self.local_images[idx]
+        # print(self.local_images[idx], idx)
+        # print(self.local_images[idx-1], idx-1)
+        # print(self.local_images[idx+1], idx+1)
+        # #s = [x for x in self.local_images if 'm.png' in x][0]
+        # print(len(self.local_images))
+        #print(self.local_images.index(s))
         with bf.BlobFile(path, "rb") as f:
             pil_image = Image.open(f)
             pil_image.load()

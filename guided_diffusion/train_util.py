@@ -41,12 +41,14 @@ class TrainLoop:
         weight_decay=0.0,
         lr_anneal_steps=0,
         val_datasets=None,
+        args=None,
     ):
         self.model = model
         self.diffusion = diffusion
         self.data = data
         self.val_datasets = val_datasets
         self.ref_samples = (next(self.val_datasets[0]), next(self.val_datasets[1]))
+        self.args = args
         self.batch_size = batch_size
         self.microbatch = microbatch if microbatch > 0 else batch_size
         self.lr = lr
@@ -80,7 +82,7 @@ class TrainLoop:
         self.opt = AdamW(
             self.mp_trainer.master_params, lr=self.lr, weight_decay=self.weight_decay
         )
-        if self.resume_step:
+        if self.resume_step and args.resume_ema_opt:
             self._load_optimizer_state()
             # Model was resumed, either due to a restart or a checkpoint
             # being specified at the command line.
@@ -269,37 +271,28 @@ class TrainLoop:
     def val_sample(self, data_to_sample=None):
         assert data_to_sample is not None
         ref_samples_data_i = self.ref_samples[data_to_sample]
+        imgs_target, model_kwargsdata = ref_samples_data_i
         self.model.eval()
-        args = lambda: None # fix it
-        args.batch_size = 8
-        args.num_samples = 8
-        args.class_cond = True
-        NUM_CLASSES = -1
-        use_ddim = False
-        image_size = self.model.image_size
+        batch_size = self.args.val_batch_size
+        num_samples = self.args.val_num_samples
+        SR_mode = self.args.SR_mode
         # Local setup
         clip_denoised = True
+        use_ddim = False
+        image_size = self.model.image_size
 
         all_images = []
-        all_labels = []
-        while len(all_images) * args.batch_size < args.num_samples:
+        while len(all_images) * batch_size < num_samples:
             model_kwargs = {}
-            if args.class_cond and False:
-                classes = th.randint(
-                    low=0, high=NUM_CLASSES, size=(args.batch_size,), device=dist_util.dev()
-                )
-                model_kwargs["y"] = classes
-            sample_fn = (
-                self.diffusion.p_sample_loop if not args.use_ddim else self.diffusion.ddim_sample_loop
-            )
+            sample_fn = self.diffusion.p_sample_loop if not use_ddim else self.diffusion.ddim_sample_loop
             #ref_samples = next(self.val_data)
-            model_kwargs['clip_feat'] = ref_samples_data_i[1]['clip_feat'].to(device=dist_util.dev())
-            if True: # SR # todo fix
-                model_kwargs['clip_feat2'] = ref_samples_data_i[1]['clip_feat2'].to(device=dist_util.dev())
-                model_kwargs['img2'] = ref_samples_data_i[1]['img2'].to(device=dist_util.dev())
+            model_kwargs['clip_feat'] = model_kwargsdata['clip_feat'].to(device=dist_util.dev())
+            if SR_mode: # SR
+                model_kwargs['clip_feat2'] = model_kwargsdata['clip_feat2'].to(device=dist_util.dev())
+                model_kwargs['img2'] = model_kwargsdata['img2'].to(device=dist_util.dev())
             sample = sample_fn(
                 self.model,
-                (args.batch_size, 3, image_size, image_size),
+                (batch_size, 3, image_size, image_size),
                 clip_denoised=clip_denoised,
                 model_kwargs=model_kwargs,
             )
@@ -311,30 +304,24 @@ class TrainLoop:
             gathered_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
             dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
             all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
-            if args.class_cond and False:
-                gathered_labels = [
-                    th.zeros_like(classes) for _ in range(dist.get_world_size())
-                ]
-                dist.all_gather(gathered_labels, classes)
-                all_labels.extend([labels.cpu().numpy() for labels in gathered_labels])
+
             #logger.log(f"created {len(all_images) * args.batch_size} samples")
 
         arr = np.concatenate(all_images, axis=0)
-        arr = arr[: args.num_samples]
-        if args.class_cond and False:
-            label_arr = np.concatenate(all_labels, axis=0)
-            label_arr = label_arr[: args.num_samples]
+        arr = arr[: num_samples]
         if dist.get_rank() == 0:
             shape_str = "x".join([str(x) for x in arr.shape])
             out_path = os.path.join(logger.get_dir(), f"samples{(self.step+self.resume_step):06d}.npz")
             #logger.log(f"saving to {out_path}, in resolution: {shape_str}")
-            if args.class_cond and False:
-                np.savez(out_path, arr, label_arr)
-            else:
-                np.savez(out_path, arr)
+            np.savez(out_path, arr)
+
+        add_diff_tosave = True
+        if add_diff_tosave:
+            imgs_target = model_kwargsdata['img']
+            sample_cp = sample_cp.cpu() +model_kwargsdata['img2']
 
         res_img = tensor2img(sample_cp)
-        save_img(tensor2img(ref_samples_data_i[0]), os.path.join(logger.get_dir(), f"img{data_to_sample}_input0.png"))
+        save_img(tensor2img(imgs_target), os.path.join(logger.get_dir(), f"img{data_to_sample}_tinput0.png"))
         save_img(res_img, os.path.join(logger.get_dir(), f"img{data_to_sample}_samples{(self.step+self.resume_step):06d}.png"))
         dist.barrier()
         #logger.log("sampling complete")

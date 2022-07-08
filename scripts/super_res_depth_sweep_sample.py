@@ -23,6 +23,8 @@ from guided_diffusion.image_datasets import load_data
 from guided_diffusion.saving_imgs_utils import save_img,tensor2img
 from guided_diffusion.script_util import load_folder_path_parse
 from guided_diffusion.sample_util import *
+
+# CUDA_VISIBLE_DEVICES=0 python scripts/super_res_depth_sweep_sample.py -f factor0 -d tstrun_factor0
 def main():
     args = create_argparser().parse_args()
     print(args.config_file)
@@ -30,7 +32,7 @@ def main():
     args = parse_yaml(args)
     load_folder_path_parse(args)
     args.large_size = args.image_size
-
+    args.main_path = os.path.join(args.main_path, args.sub_dir_tstsave)
     dist_util.setup_dist()
     logger.configure(args=args)
     logger.log(f'\n\t'.join(f'{k} = {v}' for k, v in vars(args).items()))
@@ -59,20 +61,21 @@ def main():
         random_flip=False,
         clip_file_path=args.clip_file_path_test,
     )
-    denoise_start_point = range(500, 1000, 199)
+    denoise_start_point = [500,700,900,999]
+    denoise_start_point = [50,70,90,99]
     logger.log("creating samples...")
     all_images = []
 
     counter=0
     while len(all_images) * args.batch_size < args.num_samples:
         imgs, kwargs = next(data)
-        kwargs = process1(kwargs)
+        #kwargs = process2(kwargs)
         imgs_start = kwargs['img2'].to(dist_util.dev())
         for st in denoise_start_point:
             model_kwargs = kwargs
 
             denoise_start_point_if = (st, imgs_start)
-            #model_kwargs = process1(model_kwargs)
+            model_kwargs = process1(model_kwargs)
             model_kwargs = {k: v.to(dist_util.dev()) for k, v in model_kwargs.items()}
             sample = diffusion.p_sample_loop(
                 model,

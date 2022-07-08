@@ -7,7 +7,8 @@ import argparse
 import torch.nn.functional as F
 
 from guided_diffusion import dist_util, logger
-from guided_diffusion.image_datasets import load_data
+#from guided_diffusion.image_datasets import load_data
+from guided_diffusion.img_txt_dataset import load_data
 from guided_diffusion.resample import create_named_schedule_sampler
 from guided_diffusion.script_util import (
     sr_model_and_diffusion_defaults,
@@ -19,12 +20,15 @@ from guided_diffusion.train_util import TrainLoop
 from guided_diffusion.script_util import parse_yaml
 from guided_diffusion.script_util import load_folder_path_parse
 
+# CUDA_VISIBLE_DEVICES=0 python scripts/super_res_unsup.py -f diff_est -d aa
 
 def main():
     args = create_argparser().parse_args()
     args = parse_yaml(args)
     args.large_size = args.image_size
+    args.use_unsup_loss = True
     if args.load and not args.resume_checkpoint:
+        # Update resume_checkpoint using -f and 'load_file' arguments
         load_folder_path_parse(args)
         args.resume_checkpoint = args.model_path
 
@@ -40,32 +44,7 @@ def main():
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
 
     logger.log("creating data loader...")
-    data = load_superres_data(
-        args.data_dir,
-        args.batch_size,
-        large_size=args.large_size,
-        small_size=args.small_size,
-        class_cond=args.class_cond,
-        clip_file_path=args.clip_file_path,
-    )
-    val_data = load_superres_data(
-        args.data_dir,
-        8, # args.batch_size, todo fix it
-        large_size=args.large_size,
-        small_size=args.small_size,
-        class_cond=args.class_cond,
-        deterministic=True,
-        clip_file_path=args.clip_file_path,
-    )
-    test_data = load_superres_data(
-        data_dir=args.data_dir_test,
-        batch_size=8,  # args.batch_size, todo fix it
-        large_size=args.large_size,
-        small_size=args.small_size,
-        class_cond=args.class_cond,
-        deterministic=True,
-        clip_file_path=args.clip_file_path_test,
-    )
+
     data = load_data(
         data_dir=args.data_dir,
         batch_size=args.batch_size, # bug fix
@@ -75,7 +54,7 @@ def main():
     )
     val_data = load_data(
         data_dir=args.data_dir,
-        batch_size=args.val_batch_size, # args.batch_size, todo fix it
+        batch_size=args.val_batch_size,
         image_size=args.large_size,
         class_cond=args.class_cond,
         deterministic=True,
@@ -85,7 +64,7 @@ def main():
     )
     test_data = load_data(
         data_dir=args.data_dir_test,
-        batch_size=args.val_batch_size, # args.batch_size, todo fix it
+        batch_size=args.val_batch_size,
         image_size=args.large_size,
         class_cond=args.class_cond,
         deterministic=True,
@@ -115,7 +94,7 @@ def main():
         args=args,
     ).run_loop()
 
-
+'''
 def load_superres_data(data_dir, batch_size, large_size, small_size, class_cond=False, deterministic=False, clip_file_path=None):
     data = load_data(
         data_dir=data_dir,
@@ -128,7 +107,7 @@ def load_superres_data(data_dir, batch_size, large_size, small_size, class_cond=
     for large_batch, model_kwargs in data:
         #model_kwargs["low_res"] = F.interpolate(large_batch, small_size, mode="area")
         yield large_batch, model_kwargs
-
+'''
 
 def create_argparser():
     defaults = dict(

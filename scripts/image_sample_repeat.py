@@ -7,6 +7,7 @@ import argparse
 import os
 
 import numpy as np
+import torch
 import torch as th
 import torch.distributed as dist
 
@@ -64,38 +65,69 @@ def main():
     )
     logger.log("sampling...")
     all_images = []
-    all_labels = []
+    # all_labels = []
+
+    repeat_setup = torch.linspace(200,10,20).to(torch.int).tolist()#[100]*20 #[100, 200, 300, 400, 499]
+    #repeat_setup = [100]*500 #[100, 200, 300, 400, 499]
+    #powv = torch.linspace(2,1.2,20)
+    save_res_every = 1
+    use_prev = True
+
     counter = 0
     while len(all_images) * args.batch_size < args.num_samples:
         # model_kwargs = {}
-        imgs, kwargs = next(data)
-        kwargs = add_delta_imgimg(kwargs)
-        model_kwargs = kwargs
-        imgs_start = kwargs['img2']
-        print(imgs_start.shape,kwargs['clip_feat'].shape )
-        print('args.denoise_start_point:', args.denoise_start_point, type(args.denoise_start_point))
-        if args.denoise_start_point != -1:
-            model_kwargs['img2'] = imgs_start.to(dist_util.dev())
+        imgs, model_kwargs = next(data)
+        model_kwargs['img2'] = imgs # match reconstraction to initial image (reference)
+        model_kwargs = add_delta(model_kwargs)
+        # model_kwargs = kwargs
+
+        #print(imgs_start.shape,kwargs['clip_feat'].shape )
+        #model_kwargs['img2'] = kwargs['img2'].to(dist_util.dev())
         # model_kwargs = process2(model_kwargs)
         model_kwargs = {k: v.to(dist_util.dev()) for k, v in model_kwargs.items()}
+        orig_images = model_kwargs['img2']
+        accum_diff = torch.zeros_like(orig_images)
+        sample_fn = (diffusion.p_sample_loop if not args.use_ddim else diffusion.ddim_sample_loop)
+        for repeat_id, repeat_start_step in enumerate(repeat_setup):
+            sample = sample_fn(
+                model,
+                (args.batch_size, 3, args.image_size, args.image_size),
+                clip_denoised=args.clip_denoised,
+                model_kwargs=model_kwargs,
+                denoise_start_point=repeat_start_step
+            )
+            sample_cp = sample.clone()
+            # sample = ((sample + 1) * 127.5).clamp(0, 255).to(th.uint8)
+            # sample = sample.permute(0, 2, 3, 1)
+            # sample = sample.contiguous()
 
-        sample_fn = (
-            diffusion.p_sample_loop if not args.use_ddim else diffusion.ddim_sample_loop
-        )
-        sample = sample_fn(
-            model,
-            (args.batch_size, 3, args.image_size, args.image_size),
-            clip_denoised=args.clip_denoised,
-            model_kwargs=model_kwargs,
-            denoise_start_point=args.denoise_start_point
-        )
-        sample_cp = sample.clone()
-        sample = ((sample + 1) * 127.5).clamp(0, 255).to(th.uint8)
-        sample = sample.permute(0, 2, 3, 1)
-        sample = sample.contiguous()
+            if repeat_id % save_res_every == 0:
+                res_img = tensor2img(sample_cp)
+                save_img(res_img, os.path.join(logger.get_dir(), f"samples_test{counter}_rep{repeat_id}step{repeat_start_step}.png"))
+            if use_prev:
+                assert sample_cp.shape == model_kwargs['img2'].shape, print(sample_cp.shape, model_kwargs['img2'].shape)
+                diff = ( sample_cp - orig_images)/2
+                #accum_diff = (accum_diff+diff*2)
 
-        res_img = tensor2img(sample_cp)
-        save_img(res_img, os.path.join(logger.get_dir(), f"samples_test{counter}.png"))
+                #diff_img = tensor2img(diff)
+                #save_img(diff_img, os.path.join(logger.get_dir(),
+                #                               f"diff_test{counter}_rep{repeat_id}step{repeat_start_step}.png"))
+                #accdiff_img = tensor2img(accum_diff/(repeat_id+1))
+                #save_img(accdiff_img, os.path.join(logger.get_dir(),
+                #                               f"diffacc_test{counter}_rep{repeat_id}step{repeat_start_step}.png"))
+                power = 2
+                s=5
+                res = torch.sign(diff) * torch.pow(torch.abs(diff), power)
+                res2 = diff.clone()
+                res2[torch.abs(diff)<(1/s)] = s**(power-1) * res[torch.abs(diff)<(1/s)]
+                #print(torch.all(torch.equal(res,res2)))
+                #model_kwargs = add_delta_aug(model_kwargs)
+                #model_kwargs['img2'] = orig_images + res2*2
+                model_kwargs['img2'] = sample_cp
+
+
+
+
         save_target_images = True
         if save_target_images:
             res_img = tensor2img(imgs)
@@ -103,34 +135,12 @@ def main():
         counter += 1
 
 
-        gathered_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
-        dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
-        all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
-        '''
-        if args.class_cond:
-            gathered_labels = [
-                th.zeros_like(classes) for _ in range(dist.get_world_size())
-            ]
-            dist.all_gather(gathered_labels, classes)
-            all_labels.extend([labels.cpu().numpy() for labels in gathered_labels])
-        '''
+        # gathered_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
+        # dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
+        # all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
+        all_images.append(None)
         logger.log(f"created {len(all_images) * args.batch_size} samples")
 
-    '''
-    arr = np.concatenate(all_images, axis=0)
-    arr = arr[: args.num_samples]
-    if args.class_cond:
-        label_arr = np.concatenate(all_labels, axis=0)
-        label_arr = label_arr[: args.num_samples]
-    if dist.get_rank() == 0:
-        shape_str = "x".join([str(x) for x in arr.shape])
-        out_path = os.path.join(logger.get_dir(), f"samples_{shape_str}.npz")
-        logger.log(f"saving to {out_path}")
-        if args.class_cond:
-            np.savez(out_path, arr, label_arr)
-        else:
-            np.savez(out_path, arr)
-    '''
     dist.barrier()
     logger.log("sampling complete")
 

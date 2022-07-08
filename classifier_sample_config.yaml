@@ -1,7 +1,9 @@
 main_path: /data1/erez/Documents/diff2
-load_file: ema_0.9999_800000.pt
-#resume_checkpoint: /data1/erez/Documents/diff2/211218_193412_unconditioned_generation_cont10k_with_val/model430000.pt
+sub_dir_tstsave: 0_tests
+load_file: ema_0.9999_800000.pt #model000175.pt #ema_0.9999_000175.pt
+#model_path: /data1/erez/Documents/diff2/211218_193412_unconditioned_generation_cont10k_with_val/model430000.pt
 #resume_ema_opt: False
+train_phase: False
 
 #MODEL_FLAGS
 image_size: 128
@@ -11,23 +13,10 @@ learn_sigma: True # True
 class_cond: True # True for clip embd adaGN
 #attention_resolutions: 16,problem # D:16,8, REC: 32,16,8
 num_heads: 1 # D:4
-# dropout 0.1 ?? #D:0.0
-# num_head_channels 64 ?
-# resblock_updown True ? #D:False
 use_fp16: True # D:False
-
-#DIFFUSION_FLAGS
-diffusion_steps: 1000
 noise_schedule: cosine #linear
-#Reweighted VLB?
-
-#TRAIN_FLAGS
-lr: 0.0001
-batch_size: 40
-save_interval: 5
-
 # DATA
-data_dir: /data2/erez/datasets/faces/raw_data/thumbnails128x128/
+data_dir: /data2/erez/datasets/faces/raw_data/thumbnails128x128/ # train
 clip_file_path: /data2/erez/datasets/faces/raw_data/clip_thumbnails128x128_ViT-B32_dict.pt
 
 data_dir_test: /data2/erez/datasets/faces/raw_data/celeba_hq_256/
@@ -35,9 +24,13 @@ clip_file_path_test: /data2/erez/datasets/faces/raw_data/clip_embd_celeba_hq_256
 # num_workers: 4
 
 # val-test params:
-val_batch_size: 8
-val_num_samples: 8
+batch_size: 4
+num_samples: 4
+denoise_start_point: -1 # steps from x to 0, 800
+timestep_respacing: 1000
 
+#classifier:
+clip_guidance_lambda: 1
+l1_lambda: 100
 
-# DIFFUSION_TRAINING_TEST CUDA_VISIBLE_DEVICES=2 python scripts/image_train.py -d description
-# CUDA_VISIBLE_DEVICES=2 python scripts/super_res_train.py -d description
+#model_path: p
