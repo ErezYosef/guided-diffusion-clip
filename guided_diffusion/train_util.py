@@ -3,10 +3,11 @@ import functools
 import os
 
 import blobfile as bf
-import torch as th
+import torch
 import torch.distributed as dist
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 from torch.optim import AdamW
+import numpy as np
 
 from . import dist_util, logger
 from .fp16_util import MixedPrecisionTrainer
@@ -63,7 +64,7 @@ class TrainLoop:
         self.resume_step = 0
         self.global_batch = self.batch_size * dist.get_world_size()
 
-        self.sync_cuda = th.cuda.is_available()
+        self.sync_cuda = torch.cuda.is_available()
 
         self._load_and_sync_parameters()
         self.mp_trainer = MixedPrecisionTrainer(
@@ -88,7 +89,7 @@ class TrainLoop:
                 for _ in range(len(self.ema_rate))
             ]
 
-        if th.cuda.is_available():
+        if torch.cuda.is_available():
             self.use_ddp = True
             self.ddp_model = DDP(
                 self.model,
@@ -111,6 +112,7 @@ class TrainLoop:
         resume_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
 
         if resume_checkpoint:
+            print('=== resume_checkpoint from: ', resume_checkpoint)
             self.resume_step = parse_resume_step_from_filename(resume_checkpoint)
             if dist.get_rank() == 0:
                 logger.log(f"loading model from checkpoint: {resume_checkpoint}...")
@@ -151,10 +153,7 @@ class TrainLoop:
             self.opt.load_state_dict(state_dict)
 
     def run_loop(self):
-        while (
-            not self.lr_anneal_steps
-            or self.step + self.resume_step < self.lr_anneal_steps
-        ):
+        while (not self.lr_anneal_steps or self.step + self.resume_step < self.lr_anneal_steps):
             batch, cond = next(self.data)
             self.run_step(batch, cond)
             if self.step % self.log_interval == 0:
@@ -163,6 +162,7 @@ class TrainLoop:
                 self.save()
                 # Run for a finite amount of time in integration tests.
                 if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
+                    print('recieved DIFFUSION_TRAINING_TEST indication')
                     return
             self.step += 1
         # Save the last checkpoint if it wasn't already saved.
@@ -239,7 +239,8 @@ class TrainLoop:
                 else:
                     filename = f"ema_{rate}_{(self.step+self.resume_step):06d}.pt"
                 with bf.BlobFile(bf.join(get_blob_logdir(), filename), "wb") as f:
-                    th.save(state_dict, f)
+                    torch.save(state_dict, f)
+                    #print(f'saved_to_{f}')
 
         save_checkpoint(0, self.mp_trainer.master_params)
         for rate, params in zip(self.ema_rate, self.ema_params):
@@ -250,7 +251,9 @@ class TrainLoop:
                 bf.join(get_blob_logdir(), f"opt{(self.step+self.resume_step):06d}.pt"),
                 "wb",
             ) as f:
-                th.save(self.opt.state_dict(), f)
+                torch.save(self.opt.state_dict(), f)
+
+        dist.barrier()
 
         dist.barrier()
 

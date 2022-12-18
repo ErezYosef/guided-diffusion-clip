@@ -14,14 +14,16 @@ from guided_diffusion.script_util import (
     add_dict_to_argparser,
 )
 from guided_diffusion.train_util import TrainLoop
-
+from guided_diffusion.script_util import parse_yaml
 
 def main():
     args = create_argparser().parse_args()
+    args = parse_yaml(args)
 
     dist_util.setup_dist()
-    logger.configure()
+    logger.configure(args=args)
 
+    logger.log(f'\n\t'.join(f'{k} = {v}' for k, v in vars(args).items()))
     logger.log("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(
         **args_to_dict(args, model_and_diffusion_defaults().keys())
@@ -29,7 +31,7 @@ def main():
     model.to(dist_util.dev())
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
 
-    logger.log("creating data loader...")
+    logger.log(f"creating data loader... dir: {args.data_dir}")
     data = load_data(
         data_dir=args.data_dir,
         batch_size=args.batch_size,
@@ -67,11 +69,13 @@ def create_argparser():
         batch_size=1,
         microbatch=-1,  # -1 disables microbatches
         ema_rate="0.9999",  # comma-separated list of EMA values
-        log_interval=10,
-        save_interval=10000,
+        log_interval=100,
+        save_interval=5000,
         resume_checkpoint="",
         use_fp16=False,
         fp16_scale_growth=1e-3,
+        config_file='image_train_config.yaml',
+        description=''
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

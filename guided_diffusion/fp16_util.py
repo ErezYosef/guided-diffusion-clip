@@ -3,7 +3,7 @@ Helpers to train with 16-bit precision.
 """
 
 import numpy as np
-import torch as th
+import torch
 import torch.nn as nn
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
@@ -142,18 +142,12 @@ def param_grad_or_zeros(param):
     if param.grad is not None:
         return param.grad.data.detach()
     else:
-        return th.zeros_like(param)
+        return torch.zeros_like(param)
 
 
 class MixedPrecisionTrainer:
-    def __init__(
-        self,
-        *,
-        model,
-        use_fp16=False,
-        fp16_scale_growth=1e-3,
-        initial_lg_loss_scale=INITIAL_LOG_LOSS_SCALE,
-    ):
+    def __init__(self, *, model, use_fp16=False, fp16_scale_growth=1e-3,
+        initial_lg_loss_scale=INITIAL_LOG_LOSS_SCALE, ):
         self.model = model
         self.use_fp16 = use_fp16
         self.fp16_scale_growth = fp16_scale_growth
@@ -164,29 +158,27 @@ class MixedPrecisionTrainer:
         self.lg_loss_scale = initial_lg_loss_scale
 
         if self.use_fp16:
-            self.param_groups_and_shapes = get_param_groups_and_shapes(
-                self.model.named_parameters()
-            )
+            self.param_groups_and_shapes = get_param_groups_and_shapes(self.model.named_parameters())
             self.master_params = make_master_params(self.param_groups_and_shapes)
             self.model.convert_to_fp16()
 
     def zero_grad(self):
         zero_grad(self.model_params)
 
-    def backward(self, loss: th.Tensor):
+    def backward(self, loss: torch.Tensor):
         if self.use_fp16:
             loss_scale = 2 ** self.lg_loss_scale
             (loss * loss_scale).backward()
         else:
             loss.backward()
 
-    def optimize(self, opt: th.optim.Optimizer):
+    def optimize(self, opt: torch.optim.Optimizer):
         if self.use_fp16:
             return self._optimize_fp16(opt)
         else:
             return self._optimize_normal(opt)
 
-    def _optimize_fp16(self, opt: th.optim.Optimizer):
+    def _optimize_fp16(self, opt: torch.optim.Optimizer):
         logger.logkv_mean("lg_loss_scale", self.lg_loss_scale)
         model_grads_to_master_grads(self.param_groups_and_shapes, self.master_params)
         grad_norm, param_norm = self._compute_norms(grad_scale=2 ** self.lg_loss_scale)
@@ -199,14 +191,15 @@ class MixedPrecisionTrainer:
         logger.logkv_mean("grad_norm", grad_norm)
         logger.logkv_mean("param_norm", param_norm)
 
-        self.master_params[0].grad.mul_(1.0 / (2 ** self.lg_loss_scale))
+        for p in self.master_params:
+            p.grad.mul_(1.0 / (2 ** self.lg_loss_scale))
         opt.step()
         zero_master_grads(self.master_params)
         master_params_to_model_params(self.param_groups_and_shapes, self.master_params)
         self.lg_loss_scale += self.fp16_scale_growth
         return True
 
-    def _optimize_normal(self, opt: th.optim.Optimizer):
+    def _optimize_normal(self, opt: torch.optim.Optimizer):
         grad_norm, param_norm = self._compute_norms()
         logger.logkv_mean("grad_norm", grad_norm)
         logger.logkv_mean("param_norm", param_norm)
@@ -217,10 +210,10 @@ class MixedPrecisionTrainer:
         grad_norm = 0.0
         param_norm = 0.0
         for p in self.master_params:
-            with th.no_grad():
-                param_norm += th.norm(p, p=2, dtype=th.float32).item() ** 2
+            with torch.no_grad():
+                param_norm += torch.norm(p, p=2, dtype=torch.float32).item() ** 2
                 if p.grad is not None:
-                    grad_norm += th.norm(p.grad, p=2, dtype=th.float32).item() ** 2
+                    grad_norm += torch.norm(p.grad, p=2, dtype=torch.float32).item() ** 2
         return np.sqrt(grad_norm) / grad_scale, np.sqrt(param_norm)
 
     def master_params_to_state_dict(self, master_params):

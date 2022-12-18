@@ -1,5 +1,6 @@
 import argparse
 import inspect
+import yaml
 
 from . import gaussian_diffusion as gd
 from .respace import SpacedDiffusion, space_timesteps
@@ -431,7 +432,13 @@ def add_dict_to_argparser(parser, default_dict):
             v_type = str
         elif isinstance(v, bool):
             v_type = str2bool
+        elif v == 'config-file':
+            v_type = argparse.FileType(mode='r')
         parser.add_argument(f"--{k}", default=v, type=v_type)
+    #parser.add_argument('--config-file', dest='config_file', default='image_train_config.yaml',
+    #                    type=argparse.FileType(mode='r'))
+    #parser.add_argument('-d', '--description', dest='description', type=str, default='',
+    #                    help='free description of the run')
 
 
 def args_to_dict(args, keys):
@@ -450,3 +457,18 @@ def str2bool(v):
         return False
     else:
         raise argparse.ArgumentTypeError("boolean value expected")
+
+
+def parse_yaml(args):
+    # args = parser.parse_args()
+    if args.config_file:
+        data = yaml.load(args.config_file, yaml.SafeLoader)
+        delattr(args, 'config_file')
+        arg_dict = args.__dict__
+        for key, value in data.items():
+            if isinstance(value, list):
+                for v in value:
+                    arg_dict[key].append(v)
+            else:
+                arg_dict[key] = value
+    return args
