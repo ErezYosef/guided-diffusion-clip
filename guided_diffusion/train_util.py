@@ -169,8 +169,8 @@ class TrainLoop:
             if self.step % self.save_interval == 0:
                 self.save()
                 logger.log("sampling images...")
-                self.validation_sample(self.val_dataset, only_first_batch=True)
-                self.validation_sample(self.test_dataset, only_first_batch=True)
+                self.validation_sample(self.val_dataset, only_first_batch=True, call_id=0)
+                self.validation_sample(self.test_dataset, only_first_batch=True, call_id=1)
                 logger.log("sampling completed")
                 # Run for a finite amount of time in integration tests.
                 if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
@@ -268,13 +268,16 @@ class TrainLoop:
 
         dist.barrier()
 
-    def validation_sample(self, data_to_sample, num_samples=8, only_first_batch=True):
+    def validation_sample(self, data_to_sample, num_samples=8, only_first_batch=True, call_id=0):
         if only_first_batch: # Use only the first batch of the loader every time
             sample_condition_data = self.val_samples_data if data_to_sample is self.val_dataset \
                                     else self.test_samples_data
-            num_samples = data_to_sample.batch_size # sample only batch size samples
+            batch_size = sample_condition_data[0].shape[0]
+            num_samples = batch_size # sample only batch size samples
+        else:
+            batch_size = 1
         self.model.eval()
-        batch_size = data_to_sample.batch_size
+
         image_size = self.model.image_size
         # Local setup
         clip_denoised = True
@@ -284,6 +287,7 @@ class TrainLoop:
             if not only_first_batch:
                 # sample from the dataloader. may cause different samples each call
                 sample_condition_data = next(data_to_sample)
+                batch_size = sample_condition_data[0].shape[0]
             # todo: init model_kwargs using loader data for conditioned sampling
             model_kwargs = {}
             #if args.class_cond:
@@ -321,8 +325,8 @@ class TrainLoop:
         # Removed numpy data saving
 
         res_img = tensor2img(sample_cp)
-        save_img(tensor2img(ref_samples_data_i[0]), os.path.join(logger.get_dir(), f"img{data_to_sample}_input0.png"))
-        save_img(res_img, os.path.join(logger.get_dir(), f"img{data_to_sample}_samples{(self.step+self.resume_step):06d}.png"))
+        save_img(tensor2img(sample_condition_data[0]), os.path.join(logger.get_dir(), f"img{call_id}_input0.png"))
+        save_img(res_img, os.path.join(logger.get_dir(), f"img{call_id}_samples{(self.step+self.resume_step):06d}.png"))
         dist.barrier()
         #logger.log("sampling complete")
         self.model.train()

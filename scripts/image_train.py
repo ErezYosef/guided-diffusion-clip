@@ -8,13 +8,17 @@ from guided_diffusion import dist_util, logger
 from guided_diffusion.image_datasets import load_data
 from guided_diffusion.resample import create_named_schedule_sampler
 from guided_diffusion.script_util import (
-    model_and_diffusion_defaults,
-    create_model_and_diffusion,
+    create_model_and_diffusion, create_model_new,
     args_to_dict,
     add_dict_to_argparser,
+    all_args_to_dict,
 )
+from guided_diffusion.defaults_and_args import model_and_diffusion_defaults
 from guided_diffusion.train_util import TrainLoop
 from guided_diffusion.script_util import parse_yaml
+from guided_diffusion.base_diffusion import BaseDiffusion
+from guided_diffusion.respace_diffusion import SpacedDiffusion
+from guided_diffusion.gaussian_diffusion import get_named_beta_schedule
 
 def main():
     args = create_argparser().parse_args()
@@ -25,9 +29,15 @@ def main():
 
     logger.log(f'\n\t'.join(f'{k} = {v}' for k, v in vars(args).items()))
     logger.log("creating model and diffusion...")
-    model, diffusion = create_model_and_diffusion(
-        **args_to_dict(args, model_and_diffusion_defaults().keys())
-    )
+    #model, diffusion = create_model_and_diffusion(
+    #    **args_to_dict(args, model_and_diffusion_defaults().keys()))
+    print('pass1')
+    model = create_model_new(**all_args_to_dict(args))
+    betas = get_named_beta_schedule(args.noise_schedule, args.diffusion_steps)
+    diffusion_args = all_args_to_dict(args)
+    diffusion_args['betas'] = betas
+    diffusion = SpacedDiffusion(BaseDiffusion, **diffusion_args)
+
     model.to(dist_util.dev())
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
 
@@ -91,7 +101,6 @@ def create_argparser():
         use_fp16=False,
         fp16_scale_growth=1e-3,
         config_file='image_train_config.yaml',
-        description=''
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

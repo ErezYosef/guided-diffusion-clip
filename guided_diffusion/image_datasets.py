@@ -54,15 +54,10 @@ def load_data(
         num_shards=MPI.COMM_WORLD.Get_size(),
         random_crop=random_crop,
         random_flip=random_flip,
+        deterministic=deterministic
     )
-    if deterministic:
-        loader = DataLoader(
-            dataset, batch_size=batch_size, shuffle=False, num_workers=1, drop_last=True
-        )
-    else:
-        loader = DataLoader(
-            dataset, batch_size=batch_size, shuffle=True, num_workers=1, drop_last=True
-        )
+
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=not deterministic, num_workers=1, drop_last=True)
     while True:
         yield from loader
 
@@ -89,6 +84,7 @@ class ImageDataset(Dataset):
         num_shards=1,
         random_crop=False,
         random_flip=True,
+        deterministic=False,
     ):
         super().__init__()
         self.resolution = resolution
@@ -96,11 +92,18 @@ class ImageDataset(Dataset):
         self.local_classes = None if classes is None else classes[shard:][::num_shards]
         self.random_crop = random_crop
         self.random_flip = random_flip
+        self.deterministic = deterministic
 
     def __len__(self):
         return len(self.local_images)
 
     def __getitem__(self, idx):
+        img, out_dict = self.get_sample(idx)
+        # for example:
+        out_dict['x_T_end'] = img + np.random.randn(*img.shape)*0.01
+        return img, out_dict
+
+    def get_sample(self, idx):
         path = self.local_images[idx]
         with bf.BlobFile(path, "rb") as f:
             pil_image = Image.open(f)
