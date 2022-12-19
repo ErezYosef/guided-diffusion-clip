@@ -32,18 +32,32 @@ def main():
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
 
     logger.log(f"creating data loader... dir: {args.data_dir}")
-    data = load_data(
+    train_data = load_data(
         data_dir=args.data_dir,
         batch_size=args.batch_size,
         image_size=args.image_size,
         class_cond=args.class_cond,
+    )
+    val_data = load_data(
+        data_dir=args.data_dir,
+        batch_size=8, # args.batch_size, todo fix it
+        image_size=args.image_size,
+        class_cond=args.class_cond,
+        deterministic=True,
+    )
+    test_data = load_data(
+        data_dir=args.data_dir_test,
+        batch_size=8, # args.batch_size, todo fix it
+        image_size=args.image_size,
+        class_cond=args.class_cond,
+        deterministic=True,
     )
 
     logger.log("training...")
     TrainLoop(
         model=model,
         diffusion=diffusion,
-        data=data,
+        train_data=train_data,
         batch_size=args.batch_size,
         microbatch=args.microbatch,
         lr=args.lr,
@@ -56,6 +70,8 @@ def main():
         schedule_sampler=schedule_sampler,
         weight_decay=args.weight_decay,
         lr_anneal_steps=args.lr_anneal_steps,
+        val_dataset=val_data,
+        test_dataset=test_data,
     ).run_loop()
 
 

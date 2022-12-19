@@ -13,6 +13,7 @@ from . import dist_util, logger
 from .fp16_util import MixedPrecisionTrainer
 from .nn import update_ema
 from .resample import LossAwareSampler, UniformSampler
+from .saving_imgs_utils import save_img,tensor2img
 
 # For ImageNet experiments, this was a good default value.
 # We found that the lg_loss_scale quickly climbed to
@@ -26,7 +27,7 @@ class TrainLoop:
         *,
         model,
         diffusion,
-        data,
+        train_data,
         batch_size,
         microbatch,
         lr,
@@ -39,10 +40,17 @@ class TrainLoop:
         schedule_sampler=None,
         weight_decay=0.0,
         lr_anneal_steps=0,
+        val_dataset=None,
+        test_dataset=None
     ):
         self.model = model
         self.diffusion = diffusion
-        self.data = data
+        self.data = train_data
+        self.val_dataset = val_dataset
+        self.test_dataset = test_dataset
+        self.val_samples_data = next(self.val_dataset) if self.val_dataset is not None else None
+        self.test_samples_data = next(self.test_dataset) if self.test_dataset is not None else None
+        #self.ref_samples = (next(self.val_datasets[0]), next(self.val_datasets[1]))
         self.batch_size = batch_size
         self.microbatch = microbatch if microbatch > 0 else batch_size
         self.lr = lr
@@ -160,6 +168,10 @@ class TrainLoop:
                 logger.dumpkvs()
             if self.step % self.save_interval == 0:
                 self.save()
+                logger.log("sampling images...")
+                self.validation_sample(self.val_dataset, only_first_batch=True)
+                self.validation_sample(self.test_dataset, only_first_batch=True)
+                logger.log("sampling completed")
                 # Run for a finite amount of time in integration tests.
                 if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
                     print('recieved DIFFUSION_TRAINING_TEST indication')
@@ -187,6 +199,7 @@ class TrainLoop:
             }
             last_batch = (i + self.microbatch) >= batch.shape[0]
             t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
+            # time_indices, weights_for_each_in_train
 
             compute_losses = functools.partial(
                 self.diffusion.training_losses,
@@ -213,7 +226,7 @@ class TrainLoop:
             )
             self.mp_trainer.backward(loss)
 
-    def _update_ema(self):
+    def _update_ema(self): # ExpMA filter on params
         for rate, params in zip(self.ema_rate, self.ema_params):
             update_ema(params, self.mp_trainer.master_params, rate=rate)
 
@@ -255,7 +268,64 @@ class TrainLoop:
 
         dist.barrier()
 
+    def validation_sample(self, data_to_sample, num_samples=8, only_first_batch=True):
+        if only_first_batch: # Use only the first batch of the loader every time
+            sample_condition_data = self.val_samples_data if data_to_sample is self.val_dataset \
+                                    else self.test_samples_data
+            num_samples = data_to_sample.batch_size # sample only batch size samples
+        self.model.eval()
+        batch_size = data_to_sample.batch_size
+        image_size = self.model.image_size
+        # Local setup
+        clip_denoised = True
+
+        all_images = []
+        while len(all_images) * batch_size < num_samples:
+            if not only_first_batch:
+                # sample from the dataloader. may cause different samples each call
+                sample_condition_data = next(data_to_sample)
+            # todo: init model_kwargs using loader data for conditioned sampling
+            model_kwargs = {}
+            #if args.class_cond:
+            #    classes = torch.randint(low=0, high=NUM_CLASSES, size=(args.batch_size,), device=dist_util.dev())
+            #    model_kwargs["y"] = classes
+            sample_fn = (self.diffusion.p_sample_loop) # if not args.use_ddim else self.diffusion.ddim_sample_loop)
+
+            sample = sample_fn(
+                self.model,
+                (batch_size, 3, image_size, image_size),
+                clip_denoised=clip_denoised,
+                model_kwargs=model_kwargs,
+            )
+            # Copy from image sample code:
+            sample_cp = sample.clone()
+            sample = ((sample + 1) * 127.5).clamp(0, 255).to(torch.uint8)
+            sample = sample.permute(0, 2, 3, 1)
+            sample = sample.contiguous()
+
+            gathered_samples = [torch.zeros_like(sample) for _ in range(dist.get_world_size())]
+            dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
+            all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
+            # if args.class_cond:
+            #     gathered_labels = [torch.zeros_like(classes) for _ in range(dist.get_world_size())]
+            #     dist.all_gather(gathered_labels, classes)
+            #     all_labels.extend([labels.cpu().numpy() for labels in gathered_labels])
+            #logger.log(f"created {len(all_images) * args.batch_size} samples")
+
+        arr = np.concatenate(all_images, axis=0)
+        arr = arr[: num_samples]
+        #if args.class_cond:
+        #    label_arr = np.concatenate(all_labels, axis=0)
+        #    label_arr = label_arr[: args.num_samples]
+
+        # Removed numpy data saving
+
+        res_img = tensor2img(sample_cp)
+        save_img(tensor2img(ref_samples_data_i[0]), os.path.join(logger.get_dir(), f"img{data_to_sample}_input0.png"))
+        save_img(res_img, os.path.join(logger.get_dir(), f"img{data_to_sample}_samples{(self.step+self.resume_step):06d}.png"))
         dist.barrier()
+        #logger.log("sampling complete")
+        self.model.train()
 
 
 def parse_resume_step_from_filename(filename):
