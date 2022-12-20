@@ -1,3 +1,4 @@
+import os
 import argparse
 import inspect
 import yaml
@@ -496,6 +497,10 @@ def add_dict_to_argparser(parser, default_dict):
     #                    type=argparse.FileType(mode='r'))
     parser.add_argument('-d', '--description', dest='description', type=str, default='',
                         help='free description of the run')
+    parser.add_argument('-f', '--load', dest='load', type=str, default=False,
+                        help='Load model from a .pth file')
+    parser.add_argument('--lf', dest='load_file', type=str, default=None,
+                        help='Name of the file to load the model')
 
 
 def args_to_dict(args, keys):
@@ -531,3 +536,25 @@ def parse_yaml(args):
             else:
                 arg_dict[key] = value
     return args
+
+def load_folder_path_parse(args):
+    '''
+    Find the folder in 'args.main_path' that satisfies 'args.load' condition.
+    update 'args.load' to new full path.
+    updte 'args.model_path' to the file to load
+    return: the folder name to load from
+    '''
+    if args.load_file is None:
+        args.load_file = 'final_parameters.pt' # default
+    if not os.path.isdir(os.path.join(args.main_path, args.load)):
+        folder = [name for name in os.listdir(args.main_path) if args.load in name]
+        selected = 0
+        #if args.save_folder in folder: folder.remove(args.save_folder)
+        if len(folder) > 1:
+            print(f'Options: {folder} plese be more specific which model to load.')
+            selected = int(input('Enter selection num: 0,1 .. :'))
+        args.load = os.path.join(args.main_path, folder[selected])
+        if not os.path.exists(args.model_path):
+            args.model_path = os.path.join(args.load, args.load_file)
+        return folder[selected]  # load folder name
+    return args.load # load folder name is exist
