@@ -36,6 +36,8 @@ def space_timesteps(num_timesteps, section_counts):
                 f"cannot create exactly {num_timesteps} steps with an integer stride"
             )
         section_counts = [int(x) for x in section_counts.split(",")]
+    elif isinstance(section_counts, int):
+        section_counts = [section_counts]
     size_per = num_timesteps // len(section_counts)
     extra = num_timesteps % len(section_counts)
     start_idx = 0
