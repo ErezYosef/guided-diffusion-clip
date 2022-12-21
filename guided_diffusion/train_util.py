@@ -192,9 +192,9 @@ class TrainLoop:
     def forward_backward(self, batch, cond):
         self.mp_trainer.zero_grad()
         for i in range(0, batch.shape[0], self.microbatch):
-            micro = batch[i : i + self.microbatch].to(dist_util.dev())
+            micro = batch[i : i + self.microbatch].to(dtype=torch.float32, device=dist_util.dev())
             micro_cond = {
-                k: v[i : i + self.microbatch].to(dist_util.dev())
+                k: v[i : i + self.microbatch].to(dtype=torch.float32, device=dist_util.dev())
                 for k, v in cond.items()
             }
             last_batch = (i + self.microbatch) >= batch.shape[0]
@@ -216,9 +216,7 @@ class TrainLoop:
                     losses = compute_losses()
 
             if isinstance(self.schedule_sampler, LossAwareSampler):
-                self.schedule_sampler.update_with_local_losses(
-                    t, losses["loss"].detach()
-                )
+                self.schedule_sampler.update_with_local_losses(t, losses["loss"].detach())
 
             loss = (losses["loss"] * weights).mean()
             log_loss_dict(
@@ -294,12 +292,13 @@ class TrainLoop:
             #    classes = torch.randint(low=0, high=NUM_CLASSES, size=(args.batch_size,), device=dist_util.dev())
             #    model_kwargs["y"] = classes
             sample_fn = (self.diffusion.p_sample_loop) # if not args.use_ddim else self.diffusion.ddim_sample_loop)
-
+            gt_imgs, data_dict = sample_condition_data
             sample = sample_fn(
                 self.model,
                 (batch_size, 3, image_size, image_size),
                 clip_denoised=clip_denoised,
                 model_kwargs=model_kwargs,
+                #noise=data_dict['x_T_end'].to(dtype=torch.float32, device=dist_util.dev())
             )
             # Copy from image sample code:
             sample_cp = sample.clone()
@@ -325,7 +324,8 @@ class TrainLoop:
         # Removed numpy data saving
 
         res_img = tensor2img(sample_cp)
-        save_img(tensor2img(sample_condition_data[0]), os.path.join(logger.get_dir(), f"img{call_id}_input0.png"))
+        save_img(tensor2img(gt_imgs), os.path.join(logger.get_dir(), f"img{call_id}_input0.png"))
+        save_img(tensor2img(data_dict['x_T_end']), os.path.join(logger.get_dir(), f"img{call_id}_xT.png"))
         save_img(res_img, os.path.join(logger.get_dir(), f"img{call_id}_samples{(self.step+self.resume_step):06d}.png"))
         dist.barrier()
         #logger.log("sampling complete")

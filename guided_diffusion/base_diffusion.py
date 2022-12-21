@@ -28,8 +28,10 @@ def get_loss_type(loss_type_name):
         return LossType.RESCALED_MSE
     elif loss_type_name == 'mse':
         return LossType.MSE
+    elif loss_type_name == 'l1':
+        return LossType.L1
     else:
-        raise ValueError('only loss_type_name supported: kl, rescaled_mse, mse.')
+        raise ValueError('only loss_type_name supported: kl, rescaled_mse, mse, l1.')
 
 def get_model_mean_type(model_mean_type_name):
     if model_mean_type_name == 'epsilon':
@@ -37,7 +39,7 @@ def get_model_mean_type(model_mean_type_name):
     elif model_mean_type_name == 'xstart':
         return ModelMeanType.START_X
     else:
-        raise ValueError('only loss_type_name supported: kl, rescaled_mse, mse.')
+        raise ValueError('only model_mean_type_name supported: kl, rescaled_mse, mse.')
 
 class BaseDiffusion:
     """
@@ -150,9 +152,7 @@ class BaseDiffusion:
         )
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
-    def p_mean_variance(
-        self, model, x, t, clip_denoised=True, denoised_fn=None, model_kwargs=None
-    ):
+    def p_mean_variance(self, model, x, t, clip_denoised=True, denoised_fn=None, model_kwargs=None):
         """
         Apply the model to get p(x_{t-1} | x_t), as well as a prediction of
         the initial x, x_0.
@@ -290,28 +290,7 @@ class BaseDiffusion:
         return new_mean
 
     def condition_score(self, cond_fn, p_mean_var, x, t, model_kwargs=None):
-        """
-        Compute what the p_mean_variance output would have been, should the
-        model's score function be conditioned by cond_fn.
-
-        See condition_mean() for details on cond_fn.
-
-        Unlike condition_mean(), this instead uses the conditioning strategy
-        from Song et al (2020).
-        """
-        alpha_bar = _extract_into_tensor(self.alphas_cumprod, t, x.shape)
-
-        eps = self._predict_eps_from_xstart(x, t, p_mean_var["pred_xstart"])
-        eps = eps - (1 - alpha_bar).sqrt() * cond_fn(
-            x, self._scale_timesteps(t), **model_kwargs
-        )
-
-        out = p_mean_var.copy()
-        out["pred_xstart"] = self._predict_xstart_from_eps(x, t, eps)
-        out["mean"], _, _ = self.q_posterior_mean_variance(
-            x_start=out["pred_xstart"], x_t=x, t=t
-        )
-        return out
+        raise NotImplementedError
 
     def p_sample(
         self,
@@ -322,6 +301,7 @@ class BaseDiffusion:
         denoised_fn=None,
         cond_fn=None,
         model_kwargs=None,
+        x_T_end=None,
     ):
         """
         Sample x_{t-1} from the model at the given timestep.
@@ -460,6 +440,7 @@ class BaseDiffusion:
                     denoised_fn=denoised_fn,
                     cond_fn=cond_fn,
                     model_kwargs=model_kwargs,
+                    x_T_end=noise,
                 )
                 yield out
                 img = out["sample"]
@@ -511,7 +492,7 @@ class BaseDiffusion:
         output = torch.where((t == 0), decoder_nll, kl)
         return {"output": output, "pred_xstart": out["pred_xstart"]}
 
-    def training_losses(self, model, x_start, t, model_kwargs=None, x_T_end=None):
+    def training_losses(self, model, x_start, t, model_kwargs=None):
         """
         Compute training losses for a single timestep.
 
@@ -526,8 +507,11 @@ class BaseDiffusion:
         """
         if model_kwargs is None:
             model_kwargs = {}
+        x_T_end = model_kwargs.pop('x_T_end', None)
         if x_T_end is None:
             x_T_end = torch.randn_like(x_start)
+        else:
+            x_T_end = x_T_end.to(dtype=x_start.dtype, device=x_start.device)
         x_t = self.q_sample(x_start, t, x_T_end=x_T_end)
 
         terms = {}
@@ -543,7 +527,7 @@ class BaseDiffusion:
             )["output"]
             if self.loss_type == LossType.RESCALED_KL:
                 terms["loss"] *= self.num_timesteps
-        elif self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
+        elif self.loss_type in [LossType.MSE, LossType.RESCALED_MSE, LossType.L1]:
             model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
 
             if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
@@ -581,7 +565,11 @@ class BaseDiffusion:
             #     ModelMeanType.EPSILON: x_T_end,
             # }[self.model_mean_type]
             assert model_output.shape == target.shape == x_start.shape
-            terms["mse"] = mean_flat((target - model_output) ** 2)
+            if self.loss_type == LossType.MSE:
+                terms["mse"] = mean_flat((target - model_output) ** 2)
+            elif self.loss_type == LossType.L1:
+                terms["mse"] = mean_flat( torch.nn.L1Loss(reduction='none')(target, model_output) )
+
             if "vb" in terms:
                 terms["loss"] = terms["mse"] + terms["vb"]
             else:
