@@ -298,7 +298,7 @@ class TrainLoop:
                 (batch_size, 3, image_size, image_size),
                 clip_denoised=clip_denoised,
                 model_kwargs=model_kwargs,
-                #noise=data_dict['x_T_end'].to(dtype=torch.float32, device=dist_util.dev())
+                noise=data_dict['x_T_end'].to(dtype=torch.float32, device=dist_util.dev())
             )
             # Copy from image sample code:
             sample_cp = sample.clone()
