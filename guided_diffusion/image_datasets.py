@@ -101,7 +101,7 @@ class ImageDataset(Dataset):
         img, out_dict = self.get_sample(idx)
         # for example:
         x_T_end = np.random.normal(loc=img, scale=(img+1)*0.1, size=img.shape) + np.random.randn(*img.shape)*0.1
-        out_dict['x_T_end'] = x_T_end.astype(np.float)
+        #out_dict['x_T_end'] = x_T_end.astype(np.float)
         return img, out_dict
 
     def get_sample(self, idx):

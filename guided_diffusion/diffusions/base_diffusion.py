@@ -4,10 +4,10 @@ import math
 import numpy as np
 import torch
 
-from .nn import mean_flat
-from .losses import normal_kl, discretized_gaussian_log_likelihood
-from .gaussian_diffusion import ModelVarType, ModelMeanType, LossType # get_named_beta_schedule, betas_for_alpha_bar
-from .gaussian_diffusion import _extract_into_tensor
+from guided_diffusion.nn import mean_flat
+from guided_diffusion.losses import normal_kl, discretized_gaussian_log_likelihood
+from guided_diffusion.gaussian_diffusion import ModelVarType, ModelMeanType, LossType # get_named_beta_schedule, betas_for_alpha_bar
+from guided_diffusion.gaussian_diffusion import _extract_into_tensor
 
 
 def get_model_var_type(model_var_type_name):
@@ -38,8 +38,10 @@ def get_model_mean_type(model_mean_type_name):
         return ModelMeanType.EPSILON
     elif model_mean_type_name == 'xstart':
         return ModelMeanType.START_X
+    elif model_mean_type_name == 'xprev':
+        return ModelMeanType.PREVIOUS_X
     else:
-        raise ValueError('only model_mean_type_name supported: kl, rescaled_mse, mse.')
+        raise ValueError('only model_mean_type_name supported: epsilon, xstart, xprev.')
 
 class BaseDiffusion:
     """
@@ -507,12 +509,16 @@ class BaseDiffusion:
         """
         if model_kwargs is None:
             model_kwargs = {}
-        x_T_end = model_kwargs.pop('x_T_end', None)
-        if x_T_end is None:
-            x_T_end = torch.randn_like(x_start)
+        # init x_t using given data:
+        if 'x_t' in model_kwargs:
+            x_t = model_kwargs['x_t']
+            x_T_end = x_t-x_start  # = N_t;  Supporting: ModelMeanType.EPSILON -- estimating N_t instead of X_T
         else:
-            x_T_end = x_T_end.to(dtype=x_start.dtype, device=x_start.device)
-        x_t = self.q_sample(x_start, t, x_T_end=x_T_end)
+            if 'x_T_end' in model_kwargs:
+                x_T_end = model_kwargs['x_T_end'] # should work without: .to(dtype=x_start.dtype, device=x_start.device)
+            else: # x_T is not provided
+                x_T_end = torch.randn_like(x_start)
+            x_t = self.q_sample(x_start, t, x_T_end=x_T_end)
 
         terms = {}
 
@@ -578,6 +584,18 @@ class BaseDiffusion:
             raise NotImplementedError(self.loss_type)
 
         return terms
+    @staticmethod
+    def _shape_broadcast(input_batch_scalar, input_tensor_shape):
+        '''
+        expand vector dims for pytorch broadcast shapes for math operations:
+        scalar x tensor = [B,1,1,1] x [B,C,H,W] = [B,C,H,W]
+        @param input_batch_scalar: t vector [B]
+        @param input_tensor_shape: image tensor
+        @return: t vector with broadcasted shape
+        '''
+        while len(input_batch_scalar.shape) < len(input_tensor_shape):
+            input_batch_scalar = input_batch_scalar[..., None]
+        return input_batch_scalar
 
     def _prior_bpd(*k, **kw):
         raise NotImplementedError

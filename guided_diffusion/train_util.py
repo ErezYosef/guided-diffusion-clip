@@ -298,7 +298,7 @@ class TrainLoop:
                 (batch_size, 3, image_size, image_size),
                 clip_denoised=clip_denoised,
                 model_kwargs=model_kwargs,
-                noise=data_dict['x_T_end'].to(dtype=torch.float32, device=dist_util.dev())
+                noise=gt_imgs.to(dtype=torch.float32, device=dist_util.dev())
             )
             # Copy from image sample code:
             sample_cp = sample.clone()
@@ -322,7 +322,8 @@ class TrainLoop:
         #    label_arr = label_arr[: args.num_samples]
 
         # Removed numpy data saving
-
+        x_start = gt_imgs.to(dtype=torch.float32, device=dist_util.dev())
+        data_dict['x_T_end'] = self.diffusion.q_sample_train(x_start, torch.tensor([self.diffusion.num_timesteps-1] * batch_size, device=dist_util.dev()))
         res_img = tensor2img(sample_cp)
         save_img(tensor2img(gt_imgs), os.path.join(logger.get_dir(), f"img{call_id}_input0.png"))
         save_img(tensor2img(data_dict['x_T_end']), os.path.join(logger.get_dir(), f"img{call_id}_xT.png"))
