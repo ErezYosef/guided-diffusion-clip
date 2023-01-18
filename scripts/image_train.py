@@ -8,16 +8,15 @@ from guided_diffusion import dist_util, logger
 from guided_diffusion.image_datasets import load_data
 from guided_diffusion.resample import create_named_schedule_sampler
 from guided_diffusion.script_util import (
-    create_model_and_diffusion, create_model_new,
-    args_to_dict,
+    create_model_new,
     add_dict_to_argparser,
     all_args_to_dict,
 )
 from guided_diffusion.defaults_and_args import model_and_diffusion_defaults
 from guided_diffusion.train_util import TrainLoop
 from guided_diffusion.script_util import parse_yaml
-from guided_diffusion.base_diffusion import BaseDiffusion
-from guided_diffusion.coldmix_diffusion import ColdMixDiffusion
+from guided_diffusion.diffusions.coldmix_diffusion import ColdMixDiffusion
+import guided_diffusion.diffusions as diffusions
 from guided_diffusion.respace_diffusion import SpacedDiffusion
 from guided_diffusion.gaussian_diffusion import get_named_beta_schedule
 
@@ -37,7 +36,8 @@ def main():
     betas = get_named_beta_schedule(args.noise_schedule, args.diffusion_steps)
     diffusion_args = all_args_to_dict(args)
     diffusion_args['betas'] = betas
-    diffusion = SpacedDiffusion(ColdMixDiffusion, **diffusion_args) # ColdMix or BaseDiffusion
+    diffusion_class = diffusions.get_diffusion(args.diffusion_type)  # ColdMix or BaseDiffusion
+    diffusion = SpacedDiffusion(diffusion_class, **diffusion_args)
 
     model.to(dist_util.dev())
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
