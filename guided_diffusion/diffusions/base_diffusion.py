@@ -574,7 +574,7 @@ class BaseDiffusion:
             if self.loss_type == LossType.MSE:
                 terms["mse"] = mean_flat((target - model_output) ** 2)
             elif self.loss_type == LossType.L1:
-                terms["mse"] = mean_flat( torch.nn.L1Loss(reduction='none')(target, model_output) )
+                terms["mse"] = mean_flat(torch.nn.L1Loss(reduction='none')(target, model_output))
 
             if "vb" in terms:
                 terms["loss"] = terms["mse"] + terms["vb"]

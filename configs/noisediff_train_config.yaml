@@ -1,14 +1,14 @@
 # Train run will save at: main_path/%y%m%d_%H%M%S_%description"
 main_path: /data1/erez/Documents/diff_raw
 #resume_checkpoint: /data1/erez/Documents/diff2/211219_021113_clip_feat_in_adagn_train/model080000.pt
-
+format_strs: log,csv,wandb
 #MODEL_FLAGS
 image_size: 128
 num_channels: 64 # 128
 num_res_blocks: 2
 # learn_sigma: False # True
 model_var_type_name: fixed_large  # learned_sigma / fixed_small / fixed_large (default)
-model_mean_type_name: epsilon # xprev / epsilon / xstart
+model_mean_type_name: xstart # xprev / epsilon / xstart
 class_cond: False # True for clip embd adaGN
 #attention_resolutions: 16,problem # D:16,8, REC: 32,16,8
 num_heads: 1 # D:4

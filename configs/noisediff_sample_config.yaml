@@ -2,9 +2,10 @@ main_path: /data1/erez/Documents/diff_raw
 # load: '' # use -f argument
 # sub_dir_tstsave: 0_tests # NU
 #load_file: ema_0.9999_010000.pt # or use --lf ; file name to load from folder given by (-f/ argument
-load_file: model065000.pt # or use --lf ; file name to load from folder given by (-f/ argument
+load_file: model050000.pt # or use --lf ; file name to load from folder given by (-f/ argument
 #model_path: /data1/erez/Documents/diff2/211218_193412_unconditioned_generation_cont10k_with_val/model430000.pt
 #resume_ema_opt: False
+format_strs: log,csv,wandb
 
 #MODEL_FLAGS
 image_size: 128

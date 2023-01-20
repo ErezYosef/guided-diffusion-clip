@@ -2,7 +2,7 @@
 Logger copied from OpenAI baselines to avoid extra RL-based dependencies:
 https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/logger.py
 """
-
+import numpy as np
 import os
 import sys
 import shutil
@@ -11,9 +11,11 @@ import json
 import time
 import datetime
 import tempfile
+import torch
 import warnings
 from collections import defaultdict
 from contextlib import contextmanager
+import wandb
 
 DEBUG = 10
 INFO = 20
@@ -50,7 +52,7 @@ class HumanOutputFormat(KVWriter, SeqWriter):
         key2str = {}
         for (key, val) in sorted(kvs.items()):
             if hasattr(val, "__float__"):
-                valstr = "%-8.3g" % val
+                valstr = "%-8.4g" % val
             else:
                 valstr = str(val)
             key2str[self._truncate(key)] = self._truncate(valstr)
@@ -158,37 +160,68 @@ class TensorBoardOutputFormat(KVWriter):
         self.step = 1
         prefix = "events"
         path = osp.join(osp.abspath(dir), prefix)
-        import tensorflow as tf
-        from tensorflow.python import pywrap_tensorflow
-        from tensorflow.core.util import event_pb2
-        from tensorflow.python.util import compat
+        # import tensorflow as tf
+        # from tensorflow.python import pywrap_tensorflow
+        # from tensorflow.core.util import event_pb2
+        # from tensorflow.python.util import compat
 
-        self.tf = tf
-        self.event_pb2 = event_pb2
-        self.pywrap_tensorflow = pywrap_tensorflow
-        self.writer = pywrap_tensorflow.EventsWriter(compat.as_bytes(path))
+        # self.tf = tf
+        # self.event_pb2 = event_pb2
+        # self.pywrap_tensorflow = pywrap_tensorflow
+        # self.writer = pywrap_tensorflow.EventsWriter(compat.as_bytes(path))
+        from torch.utils.tensorboard import SummaryWriter
+        self.writer = SummaryWriter(log_dir=self.dir)
 
     def writekvs(self, kvs):
         def summary_val(k, v):
             kwargs = {"tag": k, "simple_value": float(v)}
             return self.tf.Summary.Value(**kwargs)
 
-        summary = self.tf.Summary(value=[summary_val(k, v) for k, v in kvs.items()])
-        event = self.event_pb2.Event(wall_time=time.time(), summary=summary)
-        event.step = (
-            self.step
-        )  # is there any reason why you'd want to specify the step?
-        self.writer.WriteEvent(event)
-        self.writer.Flush()
-        self.step += 1
+        # summary = self.tf.Summary(value=[summary_val(k, v) for k, v in kvs.items()])
+        # event = self.event_pb2.Event(wall_time=time.time(), summary=summary)
+        step = kvs['step']
+        for k, v in kvs.items():
+            self.writer.add_scalar(k, float(v), step)
+        #event.step = (self.step)  # is there any reason why you'd want to specify the step?
+        # self.writer.WriteEvent(event)
+        # self.writer.Flush()
+        #self.step += 1
 
     def close(self):
         if self.writer:
-            self.writer.Close()
+            # self.writer.Close()
+            self.writer.close()
             self.writer = None
 
 
-def make_output_format(format, ev_dir, log_suffix=""):
+class wandb_writer(KVWriter):
+    """
+    Dumps key/value pairs into wandb.
+    """
+
+    def __init__(self, args):
+        # os.makedirs(dir, exist_ok=True)
+        # self.dir = dir
+        # self.step = 1
+        prefix = "events"
+
+        wandb.init(project="raw_denoise", entity='cpil', name=args.run_folder_name)
+        wandb.config.update(args)
+
+
+    def writekvs(self, kvs, images):
+        step = kvs['step']
+        #print([k, v.])
+        images.update(kvs)
+        uni = images
+        #print(type(uni), isinstance(uni, dict))
+        wandb.log(uni, step=step)
+        #print('logged: ', kvs)
+
+    def close(self):
+        wandb.finish()
+
+def make_output_format(format, ev_dir, log_suffix="" ,args=None):
     os.makedirs(ev_dir, exist_ok=True)
     if format == "stdout":
         return HumanOutputFormat(sys.stdout)
@@ -200,6 +233,8 @@ def make_output_format(format, ev_dir, log_suffix=""):
         return CSVOutputFormat(osp.join(ev_dir, "progress%s.csv" % log_suffix))
     elif format == "tensorboard":
         return TensorBoardOutputFormat(osp.join(ev_dir, "tb%s" % log_suffix))
+    elif format == "wandb":
+        return wandb_writer(args)
     else:
         raise ValueError("Unknown format specified: %s" % (format,))
 
@@ -327,20 +362,23 @@ def get_current():
         _configure_default_logger()
 
     return Logger.CURRENT
-
+get_logger = get_current # alias for logging
 
 class Logger(object):
     DEFAULT = None  # A logger with no output files. (See right below class definition)
     # So that you can still log to the terminal without setting up any output files
     CURRENT = None  # Current logger being used by the free functions above
 
-    def __init__(self, dir, output_formats, comm=None):
+    def __init__(self, dir, output_formats, comm=None, format_strs=None):
         self.name2val = defaultdict(float)  # values this iteration
         self.name2cnt = defaultdict(int)
+        self.wandb_name2val = defaultdict(float)
         self.level = INFO
         self.dir = dir
         self.output_formats = output_formats
         self.comm = comm
+        self.format_strs = format_strs
+        print(format_strs)
 
     # Logging API, forwarded
     # ----------------------------------------
@@ -349,10 +387,24 @@ class Logger(object):
 
     def logkv_mean(self, key, val):
         oldval, cnt = self.name2val[key], self.name2cnt[key]
-        self.name2val[key] = oldval * cnt / (cnt + 1) + val / (cnt + 1)
+        self.name2val[key] = (oldval * cnt + val) / (cnt + 1)
         self.name2cnt[key] = cnt + 1
 
+    def logimage(self, key, val, min_max=(-1,1)):
+        if 'wandb' not in self.format_strs:
+            print('images not processed', self.format_strs)
+            return
+        from .saving_imgs_utils import tensor2img
+        if isinstance(val, torch.Tensor):
+            print('torch images')
+            val = tensor2img(val, min_max=min_max)
+        #print(val.shape, val.dtype)
+        val = wandb.Image(val)
+
+        self.wandb_name2val[key] = val
+
     def dumpkvs(self):
+        #print('dump, ', self.comm, self.output_formats)
         if self.comm is None:
             d = self.name2val
         else:
@@ -367,10 +419,15 @@ class Logger(object):
                 d["dummy"] = 1  # so we don't get a warning about empty dict
         out = d.copy()  # Return the dict for unit testing purposes
         for fmt in self.output_formats:
+            #print(fmt)
             if isinstance(fmt, KVWriter):
-                fmt.writekvs(d)
+                if isinstance(fmt, wandb_writer):
+                    fmt.writekvs(d, self.wandb_name2val)
+                else:
+                    fmt.writekvs(d)
         self.name2val.clear()
         self.name2cnt.clear()
+        self.wandb_name2val.clear()
         return out
 
     def log(self, *args, level=INFO):
@@ -439,7 +496,7 @@ def mpi_weighted_mean(comm, local_name2valcount):
         return {}
 
 
-def configure(dir=None, format_strs=None, comm=None, log_suffix="", args=None, loaded_folder_name=''):
+def configure(dir=None, comm=None, log_suffix="", args=None, loaded_folder_name=''):
     """
     If comm is provided, average all numerical stats across that comm
     """
@@ -450,8 +507,8 @@ def configure(dir=None, format_strs=None, comm=None, log_suffix="", args=None, l
             tempfile.gettempdir(),
             datetime.datetime.now().strftime("openai-%Y-%m-%d-%H-%M-%S-%f"),
         )
-    dir = osp.join(args.main_path, loaded_folder_name,
-                   f"{datetime.datetime.now().strftime('%y%m%d_%H%M%S')}_{args.description}" )
+    args.run_folder_name = f"{datetime.datetime.now().strftime('%y%m%d_%H%M')}_{args.description}"
+    dir = osp.join(args.main_path, loaded_folder_name, args.run_folder_name)
     assert isinstance(dir, str)
     dir = os.path.expanduser(dir)
     os.makedirs(os.path.expanduser(dir), exist_ok=True)
@@ -459,16 +516,25 @@ def configure(dir=None, format_strs=None, comm=None, log_suffix="", args=None, l
     rank = get_rank_without_mpi_import()
     if rank > 0:
         log_suffix = log_suffix + "-rank%03i" % rank
-
+    format_strs = args.format_strs
+    print('FSTR: ', format_strs)
     if format_strs is None:
         if rank == 0:
-            format_strs = os.getenv("OPENAI_LOG_FORMAT", "stdout,log,csv").split(",")
+            format_strs = os.getenv("OPENAI_LOG_FORMAT", "log,csv,tensorboard") #stdout
+            print('ADDED TB')
         else:
-            format_strs = os.getenv("OPENAI_LOG_FORMAT_MPI", "log").split(",")
-    format_strs = filter(None, format_strs)
-    output_formats = [make_output_format(f, dir, log_suffix) for f in format_strs]
+            format_strs = os.getenv("OPENAI_LOG_FORMAT_MPI", "log")
+            print('NOT ADDED TB - IN ELSE')
+    format_strs = format_strs.split(",")
+    # if not hasattr(args, 'lr'):  # namely, in training phase:
+    #     print(type(format_strs))
+    #     format_strs.remove('tensorboard') # remove tb from logging
+    #     print('REMOVING TB')
 
-    Logger.CURRENT = Logger(dir=dir, output_formats=output_formats, comm=comm)
+    format_strs = list(filter(None, format_strs))
+    output_formats = [make_output_format(f, dir, log_suffix, args=args) for f in format_strs]
+
+    Logger.CURRENT = Logger(dir=dir, output_formats=output_formats, comm=comm, format_strs=format_strs)
     if output_formats:
         log("Logging to %s" % dir)
 

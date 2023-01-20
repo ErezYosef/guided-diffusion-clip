@@ -6,16 +6,13 @@ numpy array. This can be used to produce samples for FID evaluation.
 import argparse
 import os
 
-import numpy as np
-import torch as th
+import torch
 import torch.distributed as dist
 
 from guided_diffusion import dist_util, logger
 from guided_diffusion.script_util import (
-    NUM_CLASSES,
-    create_model_and_diffusion, create_model_new,
+    create_model_new,
     add_dict_to_argparser,
-    args_to_dict,
     all_args_to_dict,
 )
 from guided_diffusion.defaults_and_args import model_and_diffusion_defaults
@@ -24,10 +21,10 @@ from guided_diffusion.image_datasets import load_data
 from guided_diffusion.saving_imgs_utils import save_img,tensor2img
 from guided_diffusion.script_util import load_folder_path_parse
 
-from guided_diffusion.base_diffusion import BaseDiffusion
+from guided_diffusion.diffusions.base_diffusion import BaseDiffusion
 from guided_diffusion.respace_diffusion import SpacedDiffusion
 from guided_diffusion.gaussian_diffusion import get_named_beta_schedule
-
+import guided_diffusion.diffusions as diffusions
 # CUDA_VISIBLE_DEVICES=0 python scripts/image_sample.py -f in_adagn -d tstrun_adagn
 
 
@@ -49,10 +46,10 @@ def main():
     betas = get_named_beta_schedule(args.noise_schedule, args.diffusion_steps)
     diffusion_args = all_args_to_dict(args)
     diffusion_args['betas'] = betas
-    diffusion = SpacedDiffusion(BaseDiffusion, **diffusion_args)
-    model.load_state_dict(
-        dist_util.load_state_dict(args.model_path, map_location="cpu")
-    )
+    diffusion_class = diffusions.get_diffusion(args.diffusion_type)  # ColdMix or BaseDiffusion
+    diffusion = SpacedDiffusion(diffusion_class, **diffusion_args)
+    model.load_state_dict(dist_util.load_state_dict(args.model_path, map_location="cpu"))
+
     model.to(dist_util.dev())
     if args.use_fp16:
         model.convert_to_fp16()
@@ -74,6 +71,7 @@ def main():
     counter = 0
     print('args.diffusion_start_point:', args.diffusion_start_point)
     while len(all_images) * args.batch_size < args.num_samples:
+        logger.logkv("step", counter)
         # model_kwargs = {}
         imgs, kwargs = next(data)
         model_kwargs = kwargs
@@ -85,36 +83,44 @@ def main():
         sample_fn = (
             diffusion.p_sample_loop if not args.use_ddim else diffusion.ddim_sample_loop
         )
-        sample = sample_fn(
+        sample, x_T = sample_fn(
             model,
             (args.batch_size, 3, args.image_size, args.image_size),
             clip_denoised=args.clip_denoised,
             model_kwargs=model_kwargs,
-            diffusion_start_point=args.diffusion_start_point
+            diffusion_start_point=args.diffusion_start_point,
+            x_start=imgs.to(dtype=torch.float32, device=dist_util.dev()),
+            get_x_T=True
         )
         sample_cp = sample.clone()
-        sample = ((sample + 1) * 127.5).clamp(0, 255).to(th.uint8)
+        sample = ((sample + 1) * 127.5).clamp(0, 255).to(torch.uint8)
         sample = sample.permute(0, 2, 3, 1)
         sample = sample.contiguous()
 
         res_img = tensor2img(sample_cp)
         save_img(res_img, os.path.join(logger.get_dir(), f"samples_test{counter}.png"))
+        save_img(tensor2img(x_T), os.path.join(logger.get_dir(), f"samples_xT{counter}.png"))
         save_target_images = True
         if save_target_images:
-            res_img = tensor2img(imgs)
-            save_img(res_img, os.path.join(logger.get_dir(), f"target_{counter}.png"))
+            imgs_in = tensor2img(imgs)
+            save_img(imgs_in, os.path.join(logger.get_dir(), f"target_{counter}.png"))
+        logger.get_logger().logimage(f'samples_test{counter}', res_img)
+        logger.get_logger().logimage(f'target_{counter}', imgs)
+        logger.get_logger().logimage(f'samples_xT{counter}', x_T)
         counter += 1
 
-
-        gathered_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
+        gathered_samples = [torch.zeros_like(sample) for _ in range(dist.get_world_size())]
         dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
         all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
 
         logger.log(f"created {len(all_images) * args.batch_size} samples")
+        logger.dumpkvs()
+
 
 
     dist.barrier()
     logger.log("sampling complete")
+    logger.get_logger().close()
 
 
 def create_argparser():
@@ -126,6 +132,7 @@ def create_argparser():
         model_path="",
         config_file='image_sample_config.yaml',
         diffusion_start_point=None,
+        format_strs='log,csv',
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

@@ -102,6 +102,7 @@ def create_argparser():
         use_fp16=False,
         fp16_scale_growth=1e-3,
         config_file='image_train_config.yaml',
+        format_strs='log,csv',
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

@@ -164,8 +164,6 @@ class TrainLoop:
         while (not self.lr_anneal_steps or self.step + self.resume_step < self.lr_anneal_steps):
             batch, cond = next(self.data)
             self.run_step(batch, cond)
-            if self.step % self.log_interval == 0:
-                logger.dumpkvs()
             if self.step % self.save_interval == 0:
                 self.save()
                 logger.log("sampling images...")
@@ -176,6 +174,8 @@ class TrainLoop:
                 if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
                     print('recieved DIFFUSION_TRAINING_TEST indication')
                     return
+            if self.step % self.log_interval == 0:
+                logger.dumpkvs()
             self.step += 1
         # Save the last checkpoint if it wasn't already saved.
         if (self.step - 1) % self.save_interval != 0:
@@ -219,9 +219,7 @@ class TrainLoop:
                 self.schedule_sampler.update_with_local_losses(t, losses["loss"].detach())
 
             loss = (losses["loss"] * weights).mean()
-            log_loss_dict(
-                self.diffusion, t, {k: v * weights for k, v in losses.items()}
-            )
+            log_loss_dict(self.diffusion, t, {k: v * weights for k, v in losses.items()})
             self.mp_trainer.backward(loss)
 
     def _update_ema(self): # ExpMA filter on params
@@ -298,7 +296,8 @@ class TrainLoop:
                 (batch_size, 3, image_size, image_size),
                 clip_denoised=clip_denoised,
                 model_kwargs=model_kwargs,
-                noise=gt_imgs.to(dtype=torch.float32, device=dist_util.dev())
+                noise=None,
+                x_start=gt_imgs.to(dtype=torch.float32, device=dist_util.dev())
             )
             # Copy from image sample code:
             sample_cp = sample.clone()
@@ -323,11 +322,15 @@ class TrainLoop:
 
         # Removed numpy data saving
         x_start = gt_imgs.to(dtype=torch.float32, device=dist_util.dev())
-        data_dict['x_T_end'] = self.diffusion.q_sample_train(x_start, torch.tensor([self.diffusion.num_timesteps-1] * batch_size, device=dist_util.dev()))
+        data_dict['x_T_end'] = self.diffusion.q_sample(x_start, torch.tensor([self.diffusion.num_timesteps-1] * batch_size, device=dist_util.dev()))
         res_img = tensor2img(sample_cp)
         save_img(tensor2img(gt_imgs), os.path.join(logger.get_dir(), f"img{call_id}_input0.png"))
         save_img(tensor2img(data_dict['x_T_end']), os.path.join(logger.get_dir(), f"img{call_id}_xT.png"))
         save_img(res_img, os.path.join(logger.get_dir(), f"img{call_id}_samples{(self.step+self.resume_step):06d}.png"))
+        logger.get_logger().logimage(f'img{call_id}_samples', res_img)
+        if self.step == 0:
+            logger.get_logger().logimage(f'img{call_id}_input0', gt_imgs)
+            logger.get_logger().logimage(f"img{call_id}_xT", data_dict['x_T_end'])
         dist.barrier()
         #logger.log("sampling complete")
         self.model.train()
