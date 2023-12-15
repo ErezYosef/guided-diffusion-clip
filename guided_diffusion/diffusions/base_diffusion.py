@@ -8,6 +8,7 @@ from guided_diffusion.nn import mean_flat
 from guided_diffusion.losses import normal_kl, discretized_gaussian_log_likelihood
 from guided_diffusion.gaussian_diffusion import ModelVarType, ModelMeanType, LossType # get_named_beta_schedule, betas_for_alpha_bar
 from guided_diffusion.gaussian_diffusion import _extract_into_tensor
+from guided_diffusion.glide.ssim import ssim
 
 
 def get_model_var_type(model_var_type_name):
@@ -30,6 +31,9 @@ def get_loss_type(loss_type_name):
         return LossType.MSE
     elif loss_type_name == 'l1':
         return LossType.L1
+    elif loss_type_name == 'l1_ssim':
+        print('using SSIM')
+        return LossType.L1SSIM
     else:
         raise ValueError('only loss_type_name supported: kl, rescaled_mse, mse, l1.')
 
@@ -421,7 +425,7 @@ class BaseDiffusion:
         if diffusion_start_point != -1:
             start_point = diffusion_start_point # start from the specified time "t1"
             time_vec = torch.tensor([start_point] * shape[0], device=device)
-            img = self.q_sample(model_kwargs['img2'], time_vec) # init img to start point sample: X_t1
+            #img = self.q_sample(model_kwargs['img2'], time_vec) # init img to start point sample: X_t1
             print('start sampling from t_step: ', start_point)
         indices = list(range(start_point))[::-1]
 
@@ -510,7 +514,7 @@ class BaseDiffusion:
         if model_kwargs is None:
             model_kwargs = {}
         # init x_t using given data:
-        if 'x_t' in model_kwargs:
+        if 'x_t' in model_kwargs: # should exist only for RAW denoising
             x_t = model_kwargs['x_t']
             x_T_end = x_t-x_start  # = N_t;  Supporting: ModelMeanType.EPSILON -- estimating N_t instead of X_T
         else:
@@ -533,7 +537,7 @@ class BaseDiffusion:
             )["output"]
             if self.loss_type == LossType.RESCALED_KL:
                 terms["loss"] *= self.num_timesteps
-        elif self.loss_type in [LossType.MSE, LossType.RESCALED_MSE, LossType.L1]:
+        elif self.loss_type in [LossType.MSE, LossType.RESCALED_MSE, LossType.L1, LossType.L1SSIM]:
             model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
 
             if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
@@ -570,11 +574,14 @@ class BaseDiffusion:
             #     ModelMeanType.START_X: x_start,
             #     ModelMeanType.EPSILON: x_T_end,
             # }[self.model_mean_type]
-            assert model_output.shape == target.shape == x_start.shape
+            assert model_output.shape == target.shape == x_start.shape, f'{model_output.shape},{target.shape},{x_start.shape}'
             if self.loss_type == LossType.MSE:
                 terms["mse"] = mean_flat((target - model_output) ** 2)
             elif self.loss_type == LossType.L1:
                 terms["mse"] = mean_flat(torch.nn.L1Loss(reduction='none')(target, model_output))
+            elif self.loss_type == LossType.L1SSIM:
+                terms["mse"] = mean_flat(torch.nn.L1Loss(reduction='none')(target, model_output)) + \
+                               0.02*ssim(target, model_output, reduction='mean', val_range=2)
 
             if "vb" in terms:
                 terms["loss"] = terms["mse"] + terms["vb"]

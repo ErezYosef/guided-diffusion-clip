@@ -107,6 +107,8 @@ def master_params_to_state_dict(
                 state_dict[name] = unflat_master_param
     else:
         state_dict = model.state_dict()
+        if getattr(model, 'islora', False):
+            state_dict = model.lora_module_list.state_dict()
         for i, (name, _value) in enumerate(model.named_parameters()):
             assert name in state_dict
             state_dict[name] = master_params[i]

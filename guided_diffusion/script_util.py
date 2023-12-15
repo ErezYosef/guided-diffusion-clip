@@ -6,6 +6,7 @@ import yaml
 from . import gaussian_diffusion as gd
 from .respace import SpacedDiffusion, space_timesteps
 from .unet import SuperResModel, UNetModel, EncoderUNetModel
+from .unet_other import UNetModelConv
 
 NUM_CLASSES = 1000
 
@@ -202,6 +203,9 @@ def create_model_new(
     resblock_updown=False,
     use_fp16=False,
     use_new_attention_order=False,
+    input_channels=3,
+    model_class=None,
+    out_channels=None,
     **kwargs,
 ):
     if channel_mult == "":
@@ -217,16 +221,18 @@ def create_model_new(
             raise ValueError(f"unsupported image size: {image_size}")
     else:
         channel_mult = tuple(int(ch_mult) for ch_mult in channel_mult.split(","))
-
+    channel_mult = (1, 1, 2, 3, 4)
     attention_ds = []
-    for res in attention_resolutions.split(","):
-        attention_ds.append(image_size // int(res))
-
-    return UNetModel(
+    if attention_resolutions != '':
+        for res in attention_resolutions.split(","):
+            attention_ds.append(image_size // int(res))
+    out_channels = out_channels or 3
+    model_class = UNetModelConv if model_class is None else model_class
+    return model_class(
         image_size=image_size,
-        in_channels=3,
+        in_channels=input_channels,
         model_channels=num_channels,
-        out_channels=(6 if model_var_type_name == 'learned_sigma' else 3),
+        out_channels=(6 if model_var_type_name == 'learned_sigma' else out_channels),
         num_res_blocks=num_res_blocks,
         attention_resolutions=tuple(attention_ds),
         dropout=dropout,
@@ -240,6 +246,7 @@ def create_model_new(
         use_scale_shift_norm=use_scale_shift_norm,
         resblock_updown=resblock_updown,
         use_new_attention_order=use_new_attention_order,
+        **kwargs
     )
 
 
@@ -490,17 +497,46 @@ def add_dict_to_argparser(parser, default_dict):
             v_type = str
         elif isinstance(v, bool):
             v_type = str2bool
-        if k == 'config_file':
-            v_type = argparse.FileType(mode='r')
+        #if k == 'config_file':
+        #    v_type = argparse.FileType(mode='r')
         parser.add_argument(f"--{k}", default=v, type=v_type)
-    #parser.add_argument('--config-file', dest='config_file', default='image_train_config.yaml',
-    #                    type=argparse.FileType(mode='r'))
+    parser.add_argument('--config-file', dest='config_file', default='image_train_config.yaml',
+                       type=str)
     parser.add_argument('-d', '--description', dest='description', type=str, default='',
                         help='free description of the run')
     parser.add_argument('-f', '--load', dest='load', type=str, default=False,
                         help='Load model from a .pth file')
     parser.add_argument('--lf', dest='load_file', type=str, default=None,
                         help='Name of the file to load the model')
+    parser, unknown = add_all_command_args_to_parser(parser)
+    if unknown:
+        print('Warning, Unknown args: ', unknown)
+
+def add_all_command_args_to_parser(parser=None):
+    if parser is None:
+        parser = argparse.ArgumentParser()
+    def try_types(element: any, types=(int, float)):
+        # If you expect None to be passed:
+        for t in types:
+            try:
+                print(t)
+                num = t(element)
+                return t
+            except ValueError:
+                continue
+        # print('BOOL BUG', element)
+        if str(element).lower() in ['true', 'false']:
+            print('BOOL UNKNOWN')
+            return lambda e: True if e.lower() in ['true'] else False
+        return str
+
+    args, unknown = parser.parse_known_args()
+    #print('unknown', unknown)
+    for i, arg in enumerate(unknown[::2]):
+        v = unknown[2*i+1]
+        parser.add_argument(arg, dest=arg.strip('-'), default=None, type=try_types(v),
+                            help='unknown arg from command')
+    return parser, unknown
 
 
 def args_to_dict(args, keys):
@@ -523,19 +559,72 @@ def str2bool(v):
         raise argparse.ArgumentTypeError("boolean value expected")
 
 
-def parse_yaml(args):
+def parse_yaml(args, adapt_paths_to_machine=False, non_default_args={}, override_command_args=False):
+    if override_command_args:
+        # ignoring given non_default_args dict!
+        non_default_args = get_non_default_args(args=args)
+    # non_default_args: overide yaml args with command line args
     # args = parser.parse_args()
     if args.config_file:
-        data = yaml.load(args.config_file, yaml.SafeLoader)
+        #data = yaml.load(args.config_file, yaml.SafeLoader)
+        with open(args.config_file, 'r') as file:
+            data = yaml.safe_load(file)
         delattr(args, 'config_file')
         arg_dict = args.__dict__
         for key, value in data.items():
             if isinstance(value, list):
+                if len(arg_dict.get(key, []))>0:
+                    print(f'Warning, key {key} list override; using yaml file content. overriding argparse value: {arg_dict.get(key)}')
+                    if adapt_paths_to_machine:
+                        print(f'Warning, adapt_paths_to_machine not supported for lists')
+                arg_dict[key] = []
                 for v in value:
                     arg_dict[key].append(v)
             else:
-                arg_dict[key] = value
+                #print('>', key, end= ' ')
+                if not adapt_paths_to_machine or not isinstance(value, str) or key == 'paths_yamlfile':
+                    arg_dict[key] = value
+                else:
+                    arg_dict[key] = adapt_paths(key, value, getattr(args, 'paths_yamlfile', None))
+        # print(non_default_args)
+        #print(non_default_args['batch_size'])
+        arg_dict.update(non_default_args)
+        # print(arg_dict['batch_size'])
+        # print(args.batch_size)
     return args
+
+def adapt_paths(path_key, path_val, paths_yamlfile="dataset0/fi_data_paths.yaml"):
+    if '<>' not in path_val or paths_yamlfile is None:
+        return path_val
+
+    with open(paths_yamlfile, 'r') as s:
+        paths = yaml.load(s, yaml.SafeLoader)
+    run_system = os.uname()[1]
+    run_system_short = run_system[:7] # make it shorter
+    assert run_system_short in paths, f'{run_system_short} not in paths yaml file: {paths_yamlfile}'
+    assert path_key in paths[run_system_short], f'{path_key} not in {run_system} dict (in paths yaml file: {paths_yamlfile})'
+
+    new_path = path_val.replace('<>', paths[run_system_short][path_key])
+    return new_path
+
+def get_non_default_args(args=None, parser=None):
+    # use as: non_default_args = get_non_default_args(args) after parser.parse_args()
+    if args is None:
+        # use with parser and call parser.parse_args()
+        parser, unknown = add_all_command_args_to_parser(parser)
+        args = parser.parse_args() # used to parse the values
+    import sys
+    #print('===', sys.argv)
+    non_def_names = [a[2:] for a in sys.argv if a.startswith('--')] # used to parse the names
+    dict1 = args.__dict__
+    non_default_args_from_cmd = {}
+    for k in non_def_names:
+        if k in dict1:
+            non_default_args_from_cmd[k] = dict1[k] # override the future yaml loading by saving cmd line args
+        else:
+            print(f'Warning, arg: {k} in sys.argv, but not in argparser. Cant overided')
+    #print(non_default_args_from_cmd)
+    return non_default_args_from_cmd
 
 def load_folder_path_parse(args):
     '''

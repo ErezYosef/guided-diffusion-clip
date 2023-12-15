@@ -248,9 +248,9 @@ class NoiseDiffusion(BaseDiffusion):
             / (1.0 - self.alphas_cumprod)
         )
         '''
-        self.log_Lr = torch.linspace(np.log10(0.0001)*2, np.log10(0.012), self.num_timesteps)
-        self.log_Lr = torch.log10(torch.linspace(0.00000001, 0.012, self.num_timesteps)) # todo check sched.
-        self.log_Ls = 2.18 * self.log_Lr + 1.2
+        #self.log_Lr = torch.linspace(np.log10(0.0001)*2, np.log10(0.012), self.num_timesteps)
+        self.log_Ls = torch.log10(torch.linspace(0.00000001, 0.012, self.num_timesteps)) # todo check sched.
+        self.log_Lr = 2.18 * self.log_Ls + 1.2
         lambdas_std = 0.4 # in paper: 0.26
         self.log_var_L = torch.linspace(0.001, lambdas_std**2, self.num_timesteps)/1 # todo reset variance
 
@@ -258,13 +258,14 @@ class NoiseDiffusion(BaseDiffusion):
         log_mean_Lr = self.log_Lr.to(device=t.device)[t].float()
         log_mean_Ls = self.log_Ls.to(device=t.device)[t].float()
         return log_mean_Lr, log_mean_Ls
-    def q_sample(self, x_start, t, x_T_end=None, time_T=None):
+    def q_sample(self, x_start, t, x_T_end=None, time_T_end=None):
         """
         In other words, sample from q(x_t | x_0).
 
         :param x_start: the initial data batch.
         :param t: the number of diffusion steps (minus 1). Here, 0 means one step.
         :param x_T_end: if specified, the end point x_T (noise / noisy image).
+        :param time_T_end: in vase T~ is not T. i.e starting at T!=1000 (noise level, etc)
         :return: A mixed version of x_start.
         """
         if x_T_end is None:
@@ -273,9 +274,9 @@ class NoiseDiffusion(BaseDiffusion):
         assert x_T_end.shape == x_start.shape
         #norm_scale_img01 = lambda x: torch.clip((x + 1) / 2, 0, 1)
 
-        if time_T is None:
-            time_T = self.num_timesteps-1
-        log_mean_Lr_end, log_mean_Ls_end = self._get_log_mean_Lr_Ls(torch.ones_like(t)*(time_T))
+        if time_T_end is None:
+            time_T_end = self.num_timesteps - 1
+        log_mean_Lr_end, log_mean_Ls_end = self._get_log_mean_Lr_Ls(torch.ones_like(t) * time_T_end)
         Lr = NoiseDiffusion._shape_broadcast(10 ** log_mean_Lr_end, x_start.shape)
         Ls = NoiseDiffusion._shape_broadcast(10 ** log_mean_Ls_end, x_start.shape)
         #todo: if take these or t_init values or metadata values
@@ -285,9 +286,9 @@ class NoiseDiffusion(BaseDiffusion):
         #print(log_mean_Lr_end, log_mean_Lr_t)
         #print(log_mean_Ls_end, log_mean_Ls_t)
         assert torch.all(log_mean_Lr_end>=log_mean_Lr_t) and torch.all(log_mean_Ls_end>=log_mean_Ls_t), \
-            f'at t: {t} - {log_mean_Lr_t, log_mean_Ls_t}; at T: {time_T} - {log_mean_Lr_end, log_mean_Ls_end}'
+            f'at t: {t} - {log_mean_Lr_t, log_mean_Ls_t}; at T: {time_T_end} - {log_mean_Lr_end, log_mean_Ls_end}'
 
-        Lr = NoiseDiffusion._shape_broadcast(10**(log_mean_Lr_t), x_start.shape)
+        Lr = NoiseDiffusion._shape_broadcast(10**log_mean_Lr_t, x_start.shape)
         Ls = NoiseDiffusion._shape_broadcast(10**log_mean_Ls_t, x_start.shape)
         variance_t = Lr + NoiseDiffusion.norm_scale_to01(x_start) * Ls
         # took root and norm N_est by sqrt(var_t/var_end) >> N_T changed its variance to N_t variance
@@ -388,13 +389,13 @@ class NoiseDiffusion(BaseDiffusion):
         # Reconstruct X0 from Xt with Nt_pred > Xt = X0+Nt > X0 = Xt-Nt
         assert x_t.shape == eps.shape
         return x_t - eps
-    def sample_strategy(self, pred_xstart, xt, t, x_T_end):
+    def sample_strategy(self, pred_xstart, xt, t, x_T_end, time_T_end):
         '''
         Sample x_{t-1} from x_t , x_start and x_T. Choose way to sampls: naive /cold.
-        @param pred_xstart:
+        @param pred_xstart: x0 - clean image
         @param xt:
         @param t:
-        @param x_T_end:
+        @param x_T_end: noisy image
         @return:
         '''
         if torch.any(t == 0):
@@ -402,7 +403,7 @@ class NoiseDiffusion(BaseDiffusion):
                 Warning('stop sampling stategy since some t in batch reached 0 BUT NOT ALL')
             return pred_xstart
         #basic = self.q_sample(pred_xstart, t-1, x_T_end) # maybe unstable
-        coldsample = xt - self.q_sample(pred_xstart, t, x_T_end) + self.q_sample(pred_xstart, t-1, x_T_end)
+        coldsample = xt - self.q_sample(pred_xstart, t, x_T_end, time_T_end) + self.q_sample(pred_xstart, t-1, x_T_end, time_T_end)
         return coldsample
 
     @torch.no_grad()
@@ -412,16 +413,23 @@ class NoiseDiffusion(BaseDiffusion):
         if device is None:
             device = next(model.parameters()).device
         assert isinstance(shape, (tuple, list))
-        if noise is not None:
+
+        #end_T_point = self.num_timesteps # start from time T
+        Lr = model_kwargs.get('noise_Lr') if model_kwargs is not None else None
+        Ls = model_kwargs.get('noise_Ls') if model_kwargs is not None else None
+        end_T_point = self.find_denoiser_start_point(Lr, Ls)
+        end_T = torch.tensor([end_T_point] * shape[0], device=device) # the final time index
+
+        if noise is not None:  # for (real world) given noisy image
             img = noise
+        elif x_start is not None:  # use (sample) simulative image instead
+            img = self.q_sample(x_start, end_T)  # noise #change to sidd
         else:
             img = torch.randn(*shape, device=device)
-        #end_T_point = self.num_timesteps # start from time T
-        end_T_point = self.find_denoiser_start_point()
-        end_T = torch.tensor([end_T_point-1] * shape[0], device=device) # the final time index
         # sample the input image at time T:
-        img = self.q_sample(x_start, end_T)
+
         x_T_end = img
+        time_T_end = end_T_point
         '''
         if diffusion_start_point != -1:
             end_T_point = diffusion_start_point # start from the specified time "t1"
@@ -447,6 +455,7 @@ class NoiseDiffusion(BaseDiffusion):
                 cond_fn=cond_fn,
                 model_kwargs=model_kwargs,
                 x_T_end=x_T_end,
+                time_T_end=time_T_end
             )
             #yield out
             img = out["sample"]
@@ -455,11 +464,33 @@ class NoiseDiffusion(BaseDiffusion):
             return img, x_T_end
         return img
 
-    def find_denoiser_start_point(self):
+    def find_denoiser_start_point(self, Lr=None, Ls=None):
+        if Lr is None or Ls is None:
+            #print('Lr/Ls is missing')
+            return self.num_timesteps - 1
         # print('NOT IMPLEMENTED')
-        return self.num_timesteps
+        def print(*k):
+            pass
+        print(Lr.shape, Ls.shape)
+        log_Lr = torch.log10(Lr).unsqueeze(1) # shape: B,1
+        log_Ls = torch.log10(Ls).unsqueeze(1)
+        print('lr', log_Lr)
+        print('ls', log_Ls)
+        cur_device = log_Lr.device
+        pr = (log_Lr - self.log_Lr.to(cur_device))**2 # shape: B, 1000
+        ps = (log_Ls - self.log_Ls.to(cur_device))**2
+        print('pr shape', pr.shape)
+        probs = -1/(2*self.log_var_L.to(cur_device)) * (pr + ps) # B,1000
+        print('probs', probs.shape)
+        probs = -torch.log(2*np.pi*self.log_var_L.to(cur_device)) + probs
+        # probs in shape Batchsize,T
+        start_point = torch.argmax(probs, dim=1)
+        print(start_point)
+        return start_point.item()
+        #return self.num_timesteps
 
-    def p_sample(self, model, x, t, clip_denoised=True, denoised_fn=None, cond_fn=None, model_kwargs=None,x_T_end=None):
+    def p_sample(self, model, x, t, clip_denoised=True, denoised_fn=None, cond_fn=None, model_kwargs=None,
+                 x_T_end=None, time_T_end=None):
         """
         Sample x_{t-1} from the model at the given timestep x_t.
 
@@ -491,9 +522,10 @@ class NoiseDiffusion(BaseDiffusion):
             #out["mean"] = self.condition_mean(cond_fn, out, x, t, model_kwargs=model_kwargs)
             pass
         #sample = out["mean"] + nonzero_mask * torch.exp(0.5 * out["log_variance"]) * noise
-        if out['mean'] is not None:
+        if out['mean'] is not None: # ie ModelMeanType.PREVIOUS_X
             return {"sample": out['mean'], "pred_xstart": out["pred_xstart"]}
-        sample = self.sample_strategy(pred_xstart=out["pred_xstart"], xt=x, t=t, x_T_end=x_T_end)
+        sample = self.sample_strategy(pred_xstart=out["pred_xstart"], xt=x, t=t, x_T_end=x_T_end, time_T_end=time_T_end)
+        #
         return {"sample": sample, "pred_xstart": out["pred_xstart"]}
 
     def training_losses(self, model, x_start, t, model_kwargs=None):
@@ -509,7 +541,7 @@ class NoiseDiffusion(BaseDiffusion):
         assert x_start.shape == x_t.shape
         t_mask = t==0
         t[t==0] = 1 # prevent a bug in q_sample
-        posterior_mean = self.q_sample(x_start, t-1, x_T_end=x_t, time_T=t)
+        posterior_mean = self.q_sample(x_start, t - 1, x_T_end=x_t, time_T_end=t)
         posterior_mean[t_mask, ...] = x_start[t_mask, ...]
         posterior_variance = None
         posterior_log_variance_clipped = None

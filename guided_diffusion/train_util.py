@@ -5,9 +5,11 @@ import os
 import blobfile as bf
 import torch
 import torch.distributed as dist
+from torch.utils.data import DataLoader
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 from torch.optim import AdamW
 import numpy as np
+from torchvision.utils import make_grid
 
 from . import dist_util, logger
 from .fp16_util import MixedPrecisionTrainer
@@ -41,14 +43,16 @@ class TrainLoop:
         weight_decay=0.0,
         lr_anneal_steps=0,
         val_dataset=None,
-        test_dataset=None
+        test_dataset=None,
+        batches_accumulate_grads=1,
+        **kwargs,
     ):
         self.model = model
         self.diffusion = diffusion
         self.data = train_data
         self.val_dataset = val_dataset
         self.test_dataset = test_dataset
-        self.val_samples_data = next(self.val_dataset) if self.val_dataset is not None else None
+        self.val_samples_data = next(iter(self.val_dataset)) if self.val_dataset is not None else None
         self.test_samples_data = next(self.test_dataset) if self.test_dataset is not None else None
         #self.ref_samples = (next(self.val_datasets[0]), next(self.val_datasets[1]))
         self.batch_size = batch_size
@@ -57,7 +61,7 @@ class TrainLoop:
         self.ema_rate = (
             [ema_rate]
             if isinstance(ema_rate, float)
-            else [float(x) for x in ema_rate.split(",")]
+            else [float(x) for x in ema_rate.split(",") if x!='']
         )
         self.log_interval = log_interval
         self.save_interval = save_interval
@@ -67,6 +71,8 @@ class TrainLoop:
         self.schedule_sampler = schedule_sampler or UniformSampler(diffusion)
         self.weight_decay = weight_decay
         self.lr_anneal_steps = lr_anneal_steps
+        self.kwargs = kwargs
+        self.batches_accumulate_grads = batches_accumulate_grads
 
         self.step = 0
         self.resume_step = 0
@@ -97,7 +103,7 @@ class TrainLoop:
                 for _ in range(len(self.ema_rate))
             ]
 
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
             self.use_ddp = True
             self.ddp_model = DDP(
                 self.model,
@@ -120,8 +126,8 @@ class TrainLoop:
         resume_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
 
         if resume_checkpoint:
-            print('=== resume_checkpoint from: ', resume_checkpoint)
             self.resume_step = parse_resume_step_from_filename(resume_checkpoint)
+            print('=== resume_checkpoint from: ', resume_checkpoint, self.resume_step)
             if dist.get_rank() == 0:
                 logger.log(f"loading model from checkpoint: {resume_checkpoint}...")
                 self.model.load_state_dict(
@@ -136,7 +142,8 @@ class TrainLoop:
         ema_params = copy.deepcopy(self.mp_trainer.master_params)
 
         main_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
-        ema_checkpoint = find_ema_checkpoint(main_checkpoint, self.resume_step, rate)
+        resume_tag = "latest" if 'latest' in os.path.basename(main_checkpoint) else self.resume_step
+        ema_checkpoint = find_ema_checkpoint(main_checkpoint, resume_tag, rate)
         if ema_checkpoint:
             if dist.get_rank() == 0:
                 logger.log(f"loading EMA from checkpoint: {ema_checkpoint}...")
@@ -150,8 +157,9 @@ class TrainLoop:
 
     def _load_optimizer_state(self):
         main_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
+        opt_fname = f"optlatest.pt" if 'latest' in os.path.basename(main_checkpoint) else f"opt{self.resume_step:06}.pt"
         opt_checkpoint = bf.join(
-            bf.dirname(main_checkpoint), f"opt{self.resume_step:06}.pt"
+            bf.dirname(main_checkpoint), opt_fname
         )
         if bf.exists(opt_checkpoint):
             logger.log(f"loading optimizer state from checkpoint: {opt_checkpoint}")
@@ -160,41 +168,51 @@ class TrainLoop:
             )
             self.opt.load_state_dict(state_dict)
 
+    @property
+    def totstep(self):
+        return self.step + self.resume_step
+
     def run_loop(self):
         while (not self.lr_anneal_steps or self.step + self.resume_step < self.lr_anneal_steps):
-            batch, cond = next(self.data)
-            self.run_step(batch, cond)
-            if self.step % self.save_interval == 0:
-                self.save()
+
+            self.run_step()
+            if self.step % self.save_interval == 0: # if save model and inference interval
+                # override files and save disk space in factor 5
+                #self.save(file_identifier=None if self.step % (self.save_interval*5) == 0 else 'latest')
+                self.save(file_identifier=None if self.step % 50000 == 0 and self.step>0 else 'latest')
                 logger.log("sampling images...")
                 self.validation_sample(self.val_dataset, only_first_batch=True, call_id=0)
-                self.validation_sample(self.test_dataset, only_first_batch=True, call_id=1)
+                #self.validation_sample(self.test_dataset, only_first_batch=True, call_id=1)
+                self.validation_sample_for_start_point(self.val_dataset)
                 logger.log("sampling completed")
                 # Run for a finite amount of time in integration tests.
                 if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
                     print('recieved DIFFUSION_TRAINING_TEST indication')
                     return
-            if self.step % self.log_interval == 0:
+            if self.step % self.log_interval == 0: # if log metrics interval
                 logger.dumpkvs()
             self.step += 1
         # Save the last checkpoint if it wasn't already saved.
         if (self.step - 1) % self.save_interval != 0:
             self.save()
 
-    def run_step(self, batch, cond):
-        self.forward_backward(batch, cond)
+    def run_step(self):
+        for i in range(self.batches_accumulate_grads):
+            batch, cond = next(self.data)
+            self.forward_backward(batch, cond)
         took_step = self.mp_trainer.optimize(self.opt)
         if took_step:
             self._update_ema()
         self._anneal_lr()
         self.log_step()
 
-    def forward_backward(self, batch, cond):
+    def forward_backward(self, batch, cond, use_device=None):
+        use_device = use_device if use_device is not None else dist_util.dev()
         self.mp_trainer.zero_grad()
         for i in range(0, batch.shape[0], self.microbatch):
             micro = batch[i : i + self.microbatch].to(dtype=torch.float32, device=dist_util.dev())
             micro_cond = {
-                k: v[i : i + self.microbatch].to(dtype=torch.float32, device=dist_util.dev())
+                k: v[i : i + self.microbatch].to(dtype=torch.float32, device=use_device)
                 for k, v in cond.items()
             }
             last_batch = (i + self.microbatch) >= batch.shape[0]
@@ -238,17 +256,21 @@ class TrainLoop:
         logger.logkv("step", self.step + self.resume_step)
         logger.logkv("samples", (self.step + self.resume_step + 1) * self.global_batch)
 
-    def save(self):
+    def save(self, file_identifier=None):
+        if file_identifier is None:
+            file_identifier = f'{self.totstep:06d}'
         def save_checkpoint(rate, params):
             state_dict = self.mp_trainer.master_params_to_state_dict(params)
             if dist.get_rank() == 0:
                 logger.log(f"saving model {rate}...")
                 if not rate:
-                    filename = f"model{(self.step+self.resume_step):06d}.pt"
+                    filename = f"model{file_identifier}.pt"
                 else:
-                    filename = f"ema_{rate}_{(self.step+self.resume_step):06d}.pt"
+                    filename = f"ema_{rate}_{file_identifier}.pt"
                 with bf.BlobFile(bf.join(get_blob_logdir(), filename), "wb") as f:
                     torch.save(state_dict, f)
+                with bf.BlobFile(bf.join(get_blob_logdir(), f"latest.txt"), "w") as f:
+                    f.write(f'{self.totstep}')
                     #print(f'saved_to_{f}')
 
         save_checkpoint(0, self.mp_trainer.master_params)
@@ -256,10 +278,7 @@ class TrainLoop:
             save_checkpoint(rate, params)
 
         if dist.get_rank() == 0:
-            with bf.BlobFile(
-                bf.join(get_blob_logdir(), f"opt{(self.step+self.resume_step):06d}.pt"),
-                "wb",
-            ) as f:
+            with bf.BlobFile(bf.join(get_blob_logdir(), f"opt{file_identifier}.pt"),"wb",) as f:
                 torch.save(self.opt.state_dict(), f)
 
         dist.barrier()
@@ -289,15 +308,16 @@ class TrainLoop:
             #if args.class_cond:
             #    classes = torch.randint(low=0, high=NUM_CLASSES, size=(args.batch_size,), device=dist_util.dev())
             #    model_kwargs["y"] = classes
-            sample_fn = (self.diffusion.p_sample_loop) # if not args.use_ddim else self.diffusion.ddim_sample_loop)
+            sample_fn = self.diffusion.p_sample_loop # if not args.use_ddim else self.diffusion.ddim_sample_loop)
             gt_imgs, data_dict = sample_condition_data
-            sample = sample_fn(
+            sample, x_T_end = sample_fn(
                 self.model,
                 (batch_size, 3, image_size, image_size),
                 clip_denoised=clip_denoised,
                 model_kwargs=model_kwargs,
                 noise=None,
-                x_start=gt_imgs.to(dtype=torch.float32, device=dist_util.dev())
+                x_start=gt_imgs.to(dtype=torch.float32, device=dist_util.dev()),
+                get_x_T=True
             )
             # Copy from image sample code:
             sample_cp = sample.clone()
@@ -322,11 +342,13 @@ class TrainLoop:
 
         # Removed numpy data saving
         x_start = gt_imgs.to(dtype=torch.float32, device=dist_util.dev())
-        data_dict['x_T_end'] = self.diffusion.q_sample(x_start, torch.tensor([self.diffusion.num_timesteps-1] * batch_size, device=dist_util.dev()))
+        data_dict['x_T_end'] = x_T_end #self.diffusion.q_sample(x_start, torch.tensor([self.diffusion.num_timesteps-1] * batch_size, device=dist_util.dev()))
         res_img = tensor2img(sample_cp)
         save_img(tensor2img(gt_imgs), os.path.join(logger.get_dir(), f"img{call_id}_input0.png"))
         save_img(tensor2img(data_dict['x_T_end']), os.path.join(logger.get_dir(), f"img{call_id}_xT.png"))
         save_img(res_img, os.path.join(logger.get_dir(), f"img{call_id}_samples{(self.step+self.resume_step):06d}.png"))
+        mse = ((sample_cp - gt_imgs.to(dtype=torch.float32, device=dist_util.dev()))**2/4).mean() # /(2^2) due to dynamic-range -1,1
+        logger.logkv(f'PSNR_{call_id}', -10 * torch.log10(mse))
         logger.get_logger().logimage(f'img{call_id}_samples', res_img)
         if self.step == 0:
             logger.get_logger().logimage(f'img{call_id}_input0', gt_imgs)
@@ -346,7 +368,13 @@ def parse_resume_step_from_filename(filename):
         return 0
     split1 = split[-1].split(".")[0]
     try:
+        if split1=='latest':
+            with open(filename.replace('modellatest.pt', 'latest.txt'), "r") as f:
+                split1 = f.read()
         return int(split1)
+    except (IOError, OSError, FileNotFoundError) as error:
+        print('loading latest.txt: ', error)
+        return 0
     except ValueError:
         return 0
 
@@ -366,7 +394,7 @@ def find_resume_checkpoint():
 def find_ema_checkpoint(main_checkpoint, step, rate):
     if main_checkpoint is None:
         return None
-    filename = f"ema_{rate}_{(step):06d}.pt"
+    filename = f"ema_{rate}_{(step):06d}.pt" if isinstance(step, int) else f"ema_{rate}_{step}.pt"
     path = bf.join(bf.dirname(main_checkpoint), filename)
     if bf.exists(path):
         return path

@@ -17,6 +17,8 @@ from collections import defaultdict
 from contextlib import contextmanager
 import wandb
 
+from .saving_imgs_utils import tensor2img
+
 DEBUG = 10
 INFO = 20
 WARN = 30
@@ -204,9 +206,13 @@ class wandb_writer(KVWriter):
         # self.dir = dir
         # self.step = 1
         prefix = "events"
-
-        wandb.init(project="raw_denoise", entity='cpil', name=args.run_folder_name)
+        name_datetime_last = args.run_folder_name[12:] + '_' + args.run_folder_name[:11]
+        wandb_dir = osp.join(args.main_path, 'wandb')
+        os.makedirs(wandb_dir, exist_ok=True)
+        wandb.init(project=args.wandb_project, entity='cpil', name=name_datetime_last, job_type=args.job_type,
+                   tags=args.wandb_tags, dir=wandb_dir)
         wandb.config.update(args)
+        wandb.run.log_code(".", include_fn=lambda path: (path.endswith(".py") or path.endswith(".yaml")))
 
 
     def writekvs(self, kvs, images):
@@ -394,9 +400,9 @@ class Logger(object):
         if 'wandb' not in self.format_strs:
             print('images not processed', self.format_strs)
             return
-        from .saving_imgs_utils import tensor2img
+
         if isinstance(val, torch.Tensor):
-            print('torch images')
+            #print('torch images')
             val = tensor2img(val, min_max=min_max)
         #print(val.shape, val.dtype)
         val = wandb.Image(val)
