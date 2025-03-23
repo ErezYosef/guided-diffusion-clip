@@ -1,14 +1,17 @@
 main_path: /data1/erez/Documents/diff_raw
 # load: '' # use -f argument
 # sub_dir_tstsave: 0_tests # NU
-#load_file: ema_0.9999_010000.pt # or use --lf ; file name to load from folder given by (-f/ argument
-load_file: model050000.pt # or use --lf ; file name to load from folder given by (-f/ argument
+load_file: ema_0.9999_400000.pt # or use --lf ; file name to load from folder given by (-f/ argument
+#load_file: model050000.pt # or use --lf ; file name to load from folder given by (-f/ argument
 #model_path: /data1/erez/Documents/diff2/211218_193412_unconditioned_generation_cont10k_with_val/model430000.pt
 #resume_ema_opt: False
 format_strs: log,csv,wandb
+job_type: evaluation
+wandb_tags: []
 
 #MODEL_FLAGS
 image_size: 128
+input_channels: 4
 num_channels: 64 # 128
 num_res_blocks: 2
 # learn_sigma: False # True
@@ -25,7 +28,7 @@ clip_file_path_test: /data2/erez/datasets/faces/raw_data/clip_embd_celeba_hq_256
 # num_workers: 4
 
 # val-test params:
-batch_size: 8
+batch_size: 1
 num_samples: 8
 
 # DIFFUSION_FLAGS

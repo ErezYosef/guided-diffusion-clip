@@ -17,7 +17,8 @@ from guided_diffusion.script_util import (
 )
 from guided_diffusion.defaults_and_args import model_and_diffusion_defaults
 from guided_diffusion.script_util import parse_yaml
-from guided_diffusion.image_datasets import load_data
+#from guided_diffusion.image_datasets import load_data
+from guided_diffusion.datasets.sidd_raw_dataset import load_data_sidd as load_data
 from guided_diffusion.saving_imgs_utils import save_img,tensor2img
 from guided_diffusion.script_util import load_folder_path_parse
 
@@ -56,6 +57,8 @@ def main():
     model.eval()
 
     logger.log("loading data...")
+    args.wandb_tags = []
+    args.wandb_tags.append('sidd_data')
     data = load_data(
         data_dir=args.data_dir_test,
         batch_size=args.batch_size,
@@ -78,6 +81,7 @@ def main():
         if args.diffusion_start_point != -1:
             pass # do some
         # model_kwargs = process2(model_kwargs)
+        print({k: type(v) for k, v in model_kwargs.items()})
         model_kwargs = {k: v.to(dist_util.dev()) for k, v in model_kwargs.items()}
 
         sample_fn = (
@@ -96,7 +100,7 @@ def main():
         sample = ((sample + 1) * 127.5).clamp(0, 255).to(torch.uint8)
         sample = sample.permute(0, 2, 3, 1)
         sample = sample.contiguous()
-
+        print('shapeeeee: ', sample_cp.shape)
         res_img = tensor2img(sample_cp)
         save_img(res_img, os.path.join(logger.get_dir(), f"samples_test{counter}.png"))
         save_img(tensor2img(x_T), os.path.join(logger.get_dir(), f"samples_xT{counter}.png"))
@@ -108,7 +112,9 @@ def main():
         logger.get_logger().logimage(f'target_{counter}', imgs)
         logger.get_logger().logimage(f'samples_xT{counter}', x_T)
         counter += 1
-
+        mse = ((sample_cp - imgs.to(dtype=torch.float32,
+                                       device=dist_util.dev())) ** 2 / 4).mean()  # /(2^2) due to dynamic-range -1,1
+        logger.logkv(f'PSNR', -10 * torch.log10(mse))
         gathered_samples = [torch.zeros_like(sample) for _ in range(dist.get_world_size())]
         dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
         all_images.extend([sample.cpu().numpy() for sample in gathered_samples])

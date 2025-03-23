@@ -2,8 +2,12 @@
 main_path: /data1/erez/Documents/diff_raw
 #resume_checkpoint: /data1/erez/Documents/diff2/211219_021113_clip_feat_in_adagn_train/model080000.pt
 format_strs: log,csv,wandb
+wandb_project: raw_denoise
+job_type: training
+
 #MODEL_FLAGS
-image_size: 128
+image_size: 128  # Input resolution to the model
+input_channels: 4
 num_channels: 64 # 128
 num_res_blocks: 2
 # learn_sigma: False # True
@@ -26,7 +30,7 @@ noise_schedule: cosine #linear
 #TRAIN_FLAGS
 lr: 0.0001
 batch_size: 48
-save_interval: 2000
+save_interval: 2000 # save every 5 times by step number. otherwise save as 'latest' and override.
 log_interval: 500
 
 # DATA

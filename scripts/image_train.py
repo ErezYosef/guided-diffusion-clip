@@ -3,9 +3,10 @@ Train a diffusion model on images.
 """
 
 import argparse
-
 from guided_diffusion import dist_util, logger
-from guided_diffusion.image_datasets import load_data
+#from guided_diffusion.image_datasets import load_data
+from guided_diffusion.datasets.sidd_raw_dataset import load_data_sidd as load_data
+from guided_diffusion.datasets.sidd_raw_dataset import warp_DataLoader
 from guided_diffusion.resample import create_named_schedule_sampler
 from guided_diffusion.script_util import (
     create_model_new,
@@ -56,6 +57,7 @@ def main():
         class_cond=args.class_cond,
         deterministic=True,
     )
+    print(type(val_data), len(val_data))
     test_data = load_data(
         data_dir=args.data_dir_test,
         batch_size=8, # args.batch_size, todo fix it
@@ -68,7 +70,7 @@ def main():
     TrainLoop(
         model=model,
         diffusion=diffusion,
-        train_data=train_data,
+        train_data=warp_DataLoader(train_data),
         batch_size=args.batch_size,
         microbatch=args.microbatch,
         lr=args.lr,
@@ -82,7 +84,7 @@ def main():
         weight_decay=args.weight_decay,
         lr_anneal_steps=args.lr_anneal_steps,
         val_dataset=val_data,
-        test_dataset=test_data,
+        test_dataset=warp_DataLoader(test_data),
     ).run_loop()
 
 

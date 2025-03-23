@@ -203,6 +203,10 @@ class MixedPrecisionTrainer:
 
     def _optimize_normal(self, opt: torch.optim.Optimizer):
         grad_norm, param_norm = self._compute_norms()
+        if check_overflow(grad_norm):
+            zero_master_grads(self.master_params)
+            #torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            return False
         logger.logkv_mean("grad_norm", grad_norm)
         logger.logkv_mean("param_norm", param_norm)
         opt.step()
